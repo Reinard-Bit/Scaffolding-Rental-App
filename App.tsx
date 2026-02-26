@@ -3789,20 +3789,25 @@ const App: React.FC = () => {
       {isRentalModalOpen && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setIsRentalModalOpen(false)} />
-          <div className="relative w-[95%] max-w-5xl bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
-            <div className="flex items-center justify-between mb-6 shrink-0 border-b border-neutral-800 pb-4">
+          <div className="relative w-full max-w-2xl bg-[#0a0a0a] border border-neutral-800 rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between px-5 py-4 md:px-8 md:py-6 border-b border-neutral-800 shrink-0 bg-[#0a0a0a] z-10">
                 <div>
-                  <h2 className="text-xl font-bold flex items-center text-white">
+                  <h2 className="text-lg md:text-xl font-bold flex items-center text-white">
                       <FileText size={20} className="mr-2 text-blue-500" /> New Rental Contract
                   </h2>
-                  <p className="text-xs text-neutral-500 mt-1">Step {rentalStep} of 4: {
-                    rentalStep === 1 ? "Client & Type" :
-                    rentalStep === 2 ? "Rental Period" :
-                    rentalStep === 3 ? "Select Equipment" :
-                    "Final Details"
-                  }</p>
+                  <div className="flex items-center mt-1.5 space-x-2">
+                    <span className="px-2 py-0.5 rounded bg-neutral-800 text-[10px] font-bold text-neutral-400 uppercase tracking-wider">
+                      Step {rentalStep}/4
+                    </span>
+                    <span className="text-xs text-neutral-500 font-medium">
+                      {rentalStep === 1 ? "Client & Type" :
+                       rentalStep === 2 ? "Rental Period" :
+                       rentalStep === 3 ? "Select Equipment" :
+                       "Final Details"}
+                    </span>
+                  </div>
                 </div>
-                <button onClick={() => setIsRentalModalOpen(false)} className="text-neutral-500 hover:text-white transition-colors">
+                <button onClick={() => setIsRentalModalOpen(false)} className="p-2 -mr-2 text-neutral-500 hover:text-white transition-colors rounded-full hover:bg-neutral-800">
                     <X size={20} />
                 </button>
             </div>
@@ -3813,16 +3818,16 @@ const App: React.FC = () => {
                 
                 {/* Step 1: Client & Type */}
                 {rentalStep === 1 && (
-                  <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300">
+                  <div className="space-y-6 animate-in fade-in slide-in-from-right-8 duration-300">
                     <div>
-                        <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-2">Contract Type</label>
-                        <div className="flex bg-neutral-900 p-1 rounded-xl border border-neutral-800">
+                        <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">Contract Type</label>
+                        <div className="flex bg-neutral-900 p-1.5 rounded-xl border border-neutral-800">
                             <button
                                 type="button"
                                 onClick={() => setRentalForm({...rentalForm, rateType: 'Daily'})}
-                                className={`flex-1 py-3 text-xs font-bold rounded-lg transition-all ${rentalForm.rateType === 'Daily' ? 'bg-blue-600 text-white shadow-lg' : 'text-neutral-500 hover:text-neutral-300'}`}
+                                className={`flex-1 py-3 text-xs md:text-sm font-bold rounded-lg transition-all ${rentalForm.rateType === 'Daily' ? 'bg-blue-600 text-white shadow-md' : 'text-neutral-500 hover:text-neutral-300'}`}
                             >
-                                Daily / Custom Dates
+                                Daily / Custom
                             </button>
                             <button
                                 type="button"
@@ -3836,7 +3841,7 @@ const App: React.FC = () => {
                                         endDate: start.toISOString().split('T')[0]
                                      });
                                 }}
-                                className={`flex-1 py-3 text-xs font-bold rounded-lg transition-all ${rentalForm.rateType === 'Monthly' ? 'bg-blue-600 text-white shadow-lg' : 'text-neutral-500 hover:text-neutral-300'}`}
+                                className={`flex-1 py-3 text-xs md:text-sm font-bold rounded-lg transition-all ${rentalForm.rateType === 'Monthly' ? 'bg-blue-600 text-white shadow-md' : 'text-neutral-500 hover:text-neutral-300'}`}
                             >
                                 Monthly Fixed
                             </button>
@@ -3844,10 +3849,10 @@ const App: React.FC = () => {
                     </div>
 
                     <div>
-                      <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-2">Select Client</label>
+                      <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">Select Client</label>
                       <select 
                         required
-                        className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white"
+                        className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white appearance-none"
                         value={rentalForm.customerId}
                         onChange={(e) => {
                           const selectedCId = e.target.value;
@@ -3864,21 +3869,24 @@ const App: React.FC = () => {
                           <option key={c.id} value={c.id}>{c.name} - {c.company}</option>
                         ))}
                       </select>
+                      <div className="mt-2 text-[10px] text-neutral-500 px-1">
+                        * Selecting a client will auto-fill the delivery address in the final step.
+                      </div>
                     </div>
                   </div>
                 )}
 
                 {/* Step 2: Dates */}
                 {rentalStep === 2 && (
-                  <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300">
+                  <div className="space-y-6 animate-in fade-in slide-in-from-right-8 duration-300">
                     <div>
-                      <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-2">Start Date</label>
+                      <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">Start Date</label>
                       <div className="relative">
-                        <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-500" size={16} />
+                        <Calendar className="absolute left-4 top-1/2 -translate-y-1/2 text-neutral-500" size={18} />
                         <input 
                           required
                           type="date"
-                          className="w-full bg-neutral-900 border border-neutral-800 rounded-xl pl-10 pr-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white [color-scheme:dark]"
+                          className="w-full bg-neutral-900 border border-neutral-800 rounded-xl pl-12 pr-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white [color-scheme:dark]"
                           value={rentalForm.startDate}
                           onChange={(e) => {
                                const newStart = e.target.value;
@@ -3901,13 +3909,13 @@ const App: React.FC = () => {
                     <div>
                       {rentalForm.rateType === 'Daily' ? (
                           <>
-                              <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-2">End Date</label>
+                              <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">End Date</label>
                               <div className="relative">
-                              <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-500" size={16} />
+                              <Calendar className="absolute left-4 top-1/2 -translate-y-1/2 text-neutral-500" size={18} />
                               <input 
                                   required
                                   type="date"
-                                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl pl-10 pr-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white [color-scheme:dark]"
+                                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl pl-12 pr-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white [color-scheme:dark]"
                                   value={rentalForm.endDate}
                                   min={rentalForm.startDate}
                                   onChange={(e) => setRentalForm({ ...rentalForm, endDate: e.target.value })}
@@ -3916,15 +3924,15 @@ const App: React.FC = () => {
                           </>
                       ) : (
                           <>
-                              <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-2">Duration (Months)</label>
+                              <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">Duration (Months)</label>
                               <div className="relative">
-                              <Clock className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-500" size={16} />
+                              <Clock className="absolute left-4 top-1/2 -translate-y-1/2 text-neutral-500" size={18} />
                               <input 
                                   required
                                   type="number"
                                   min="1"
                                   step="0.5"
-                                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl pl-10 pr-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white"
+                                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl pl-12 pr-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white"
                                   value={rentalForm.manualMonths}
                                   onChange={(e) => {
                                       const months = parseFloat(e.target.value) || 0;
@@ -3946,47 +3954,50 @@ const App: React.FC = () => {
 
                 {/* Step 3: Equipment */}
                 {rentalStep === 3 && (
-                  <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300">
+                  <div className="space-y-6 animate-in fade-in slide-in-from-right-8 duration-300">
                     {/* Quick Add Set UI */}
-                    <div className="bg-blue-900/10 border border-blue-500/20 rounded-xl p-4">
-                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                            <div className="flex items-center space-x-4">
-                                <div className="p-3 bg-blue-600 rounded-lg text-white shrink-0 shadow-lg shadow-blue-600/20">
+                    <div className="bg-gradient-to-br from-blue-900/20 to-blue-900/5 border border-blue-500/20 rounded-2xl p-4 md:p-5">
+                        <div className="flex flex-col gap-4">
+                            <div className="flex items-start space-x-4">
+                                <div className="p-3 bg-blue-600 rounded-xl text-white shrink-0 shadow-lg shadow-blue-600/20">
                                     <Layers size={24} />
                                 </div>
                                 <div>
-                                    <h4 className="text-base font-bold text-white">Add Set</h4>
-                                    <p className="text-[10px] text-neutral-400 mt-0.5">2x Main Frame, 2x Cross Brace, 4x Join Pin</p>
+                                    <h4 className="text-base font-bold text-white">Quick Add Set</h4>
+                                    <p className="text-[11px] text-neutral-400 mt-1 leading-relaxed">
+                                      Includes: 2x Main Frame, 2x Cross Brace, 4x Join Pin
+                                    </p>
                                 </div>
                             </div>
-                            <div className="flex items-center space-x-3 self-end md:self-auto bg-neutral-900/50 p-1.5 rounded-xl border border-neutral-800">
-                                <div className="flex flex-col px-2">
-                                    <label className="text-[9px] font-black uppercase tracking-widest text-neutral-500 mb-0.5">Set Qty</label>
+                            
+                            <div className="flex items-center gap-3 bg-black/20 p-2 rounded-xl border border-white/5">
+                                <div className="flex-1 flex flex-col px-2">
+                                    <label className="text-[9px] font-black uppercase tracking-widest text-neutral-500 mb-0.5">Quantity</label>
                                     <input 
                                         type="number" 
                                         min="1"
                                         value={setCount}
                                         onChange={(e) => setSetCount(Math.max(1, parseInt(e.target.value) || 0))}
-                                        className="w-12 bg-transparent text-center font-bold text-white focus:outline-none text-lg"
+                                        className="w-full bg-transparent font-bold text-white focus:outline-none text-lg"
                                     />
                                 </div>
                                 <button 
                                     type="button"
                                     onClick={handleAddSet}
-                                    className="h-10 w-10 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-lg transition-all active:scale-95 flex items-center justify-center shadow-lg"
+                                    className="h-10 px-4 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-lg transition-all active:scale-95 flex items-center justify-center shadow-lg text-sm"
                                 >
-                                    <Plus size={20} />
+                                    <Plus size={16} className="mr-2" /> Add
                                 </button>
                             </div>
                         </div>
                     </div>
 
-                    <div className="flex items-center justify-between mb-2 border-b border-neutral-800 pb-2">
+                    <div className="flex items-center justify-between mb-2 border-b border-neutral-800 pb-3">
                         <h3 className="text-sm font-bold text-white">Equipment List</h3>
-                        <span className="text-xs text-neutral-500 bg-neutral-800 px-2 py-1 rounded-lg">
+                        <span className="text-[10px] font-bold text-neutral-400 bg-neutral-900 border border-neutral-800 px-2 py-1 rounded-lg">
                         {rentalForm.rateType === 'Daily' 
-                            ? `Duration: ${calculateDaysDiff()} Days` 
-                            : `Duration: ${rentalForm.manualMonths} Months (Fixed)`}
+                            ? `${calculateDaysDiff()} Days` 
+                            : `${rentalForm.manualMonths} Months`}
                         </span>
                     </div>
 
@@ -4003,23 +4014,23 @@ const App: React.FC = () => {
                             : 0;
                         
                         return (
-                            <div key={row.id} className="relative bg-neutral-900/40 p-4 rounded-xl border border-neutral-800/50 hover:border-blue-500/30 transition-all group">
+                            <div key={row.id} className="relative bg-neutral-900/60 p-4 rounded-2xl border border-neutral-800 hover:border-blue-500/30 transition-all group">
                                 <button 
                                     type="button"
                                     onClick={() => removeRentalItemRow(row.id)}
-                                    className="absolute top-3 right-3 text-neutral-600 hover:text-rose-500 transition-colors"
+                                    className="absolute -top-2 -right-2 bg-neutral-800 text-neutral-400 hover:text-rose-500 hover:bg-neutral-700 p-1.5 rounded-full border border-neutral-700 shadow-sm transition-all z-10"
                                 >
-                                    <Trash2 size={16} />
+                                    <X size={14} />
                                 </button>
 
                                 <div className="grid grid-cols-1 gap-4">
                                     {/* Item Select */}
                                     <div>
-                                        <label className="block text-[9px] font-black text-neutral-500 uppercase tracking-widest mb-1.5">Select Equipment</label>
+                                        <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1.5">Item Name</label>
                                         <div className="relative">
                                             <select 
                                                 required
-                                                className="w-full bg-neutral-900 border border-neutral-700 rounded-lg pl-3 pr-8 py-2.5 text-sm focus:ring-1 focus:ring-blue-500 outline-none text-white appearance-none"
+                                                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl pl-3 pr-8 py-3 text-sm focus:ring-1 focus:ring-blue-500 outline-none text-white appearance-none"
                                                 value={row.itemId}
                                                 onChange={(e) => updateRentalItemRow(row.id, 'itemId', e.target.value)}
                                             >
@@ -4032,29 +4043,30 @@ const App: React.FC = () => {
                                         </div>
                                     </div>
 
-                                    <div className="grid grid-cols-2 gap-4">
-                                        <div>
-                                            <label className="block text-[9px] font-black text-neutral-500 uppercase tracking-widest mb-1">Rate</label>
-                                            <div className="text-sm font-bold text-neutral-400 py-2">
+                                    <div className="grid grid-cols-12 gap-3">
+                                        <div className="col-span-5">
+                                            <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1">Rate</label>
+                                            <div className="text-xs font-bold text-neutral-400 py-3 px-3 bg-neutral-950 rounded-xl border border-neutral-800 truncate">
                                                 {item ? formatCurrency(rentalForm.rateType === 'Monthly' ? item.monthlyPrice : item.unitPrice) : '-'}
                                             </div>
                                         </div>
-                                        <div>
-                                            <label className="block text-[9px] font-black text-neutral-500 uppercase tracking-widest mb-1">Qty</label>
+                                        <div className="col-span-3">
+                                            <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1">Qty</label>
                                             <input 
                                                 required
                                                 type="number"
                                                 min="1"
-                                                className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:ring-1 focus:ring-blue-500 outline-none text-white font-bold"
+                                                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-2 py-2.5 text-sm focus:ring-1 focus:ring-blue-500 outline-none text-white font-bold text-center"
                                                 value={row.quantity}
                                                 onChange={(e) => updateRentalItemRow(row.id, 'quantity', parseInt(e.target.value) || 0)}
                                             />
                                         </div>
-                                    </div>
-                                    
-                                    <div className="flex justify-between items-center border-t border-neutral-800 pt-2 mt-1">
-                                        <span className="text-xs font-bold text-neutral-500">Subtotal</span>
-                                        <span className="text-sm font-bold text-white">{formatCurrency(subtotal)}</span>
+                                        <div className="col-span-4">
+                                            <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1 text-right">Subtotal</label>
+                                            <div className="text-xs font-bold text-white py-3 px-3 bg-neutral-950 rounded-xl border border-neutral-800 text-right truncate">
+                                                {formatCurrency(subtotal)}
+                                            </div>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -4065,37 +4077,37 @@ const App: React.FC = () => {
                     <button 
                       type="button"
                       onClick={addRentalItemRow}
-                      className="w-full py-3 border border-dashed border-neutral-800 rounded-xl flex items-center justify-center text-neutral-500 hover:text-blue-500 hover:border-blue-500/30 hover:bg-blue-500/5 transition-all text-xs font-bold uppercase tracking-widest mt-4 group"
+                      className="w-full py-3.5 border border-dashed border-neutral-800 rounded-xl flex items-center justify-center text-neutral-500 hover:text-blue-500 hover:border-blue-500/30 hover:bg-blue-500/5 transition-all text-xs font-bold uppercase tracking-widest mt-4 group"
                     >
-                      <Plus size={14} className="mr-2 group-hover:scale-110 transition-transform" /> Add another item
+                      <Plus size={16} className="mr-2 group-hover:scale-110 transition-transform" /> Add Item
                     </button>
                   </div>
                 )}
 
                 {/* Step 4: Details */}
                 {rentalStep === 4 && (
-                  <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300">
+                  <div className="space-y-6 animate-in fade-in slide-in-from-right-8 duration-300">
                     <div>
-                       <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-2">Site Address / Delivery Location <span className="text-rose-500">*</span></label>
+                       <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">Delivery Location <span className="text-rose-500">*</span></label>
                        <textarea
                           required
                           rows={3}
-                          className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white"
+                          className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white placeholder-neutral-600"
                           value={rentalForm.deliveryAddress}
                           onChange={(e) => setRentalForm({ ...rentalForm, deliveryAddress: e.target.value })}
                           placeholder="Enter the specific project site address..."
                        />
                     </div>
 
-                    <div className="grid grid-cols-1 gap-4 bg-neutral-900/50 p-4 rounded-xl border border-neutral-800/50">
+                    <div className="grid grid-cols-1 gap-5 bg-neutral-900/50 p-5 rounded-2xl border border-neutral-800/50">
                        <div>
-                           <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-2">Security Deposit (IDR)</label>
+                           <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">Security Deposit (IDR)</label>
                            <div className="relative">
-                               <Wallet className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-500" size={16} />
+                               <Wallet className="absolute left-4 top-1/2 -translate-y-1/2 text-neutral-500" size={18} />
                                <input 
                                     type="number"
                                     min="0"
-                                    className="w-full bg-neutral-900 border border-neutral-700 rounded-xl pl-10 pr-4 py-3 text-sm focus:ring-2 focus:ring-emerald-500 outline-none transition-all text-white"
+                                    className="w-full bg-neutral-900 border border-neutral-700 rounded-xl pl-12 pr-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-emerald-500 outline-none transition-all text-white placeholder-neutral-600"
                                     value={rentalForm.deposit}
                                     onChange={(e) => setRentalForm({ ...rentalForm, deposit: parseInt(e.target.value) || 0 })}
                                     placeholder="0"
@@ -4103,13 +4115,13 @@ const App: React.FC = () => {
                            </div>
                        </div>
                        <div>
-                           <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-2">Delivery & Setup Fee (IDR)</label>
+                           <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">Delivery & Setup Fee (IDR)</label>
                            <div className="relative">
-                               <Truck className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-500" size={16} />
+                               <Truck className="absolute left-4 top-1/2 -translate-y-1/2 text-neutral-500" size={18} />
                                <input 
                                     type="number"
                                     min="0"
-                                    className="w-full bg-neutral-900 border border-neutral-700 rounded-xl pl-10 pr-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white"
+                                    className="w-full bg-neutral-900 border border-neutral-700 rounded-xl pl-12 pr-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white placeholder-neutral-600"
                                     value={rentalForm.deliveryFee}
                                     onChange={(e) => setRentalForm({ ...rentalForm, deliveryFee: parseInt(e.target.value) || 0 })}
                                     placeholder="0"
@@ -4117,10 +4129,10 @@ const App: React.FC = () => {
                            </div>
                        </div>
                        <div>
-                           <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-2">Payment Status</label>
+                           <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">Payment Status</label>
                             <div className="relative">
                                <select
-                                    className="w-full bg-neutral-900 border border-neutral-700 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white appearance-none"
+                                    className="w-full bg-neutral-900 border border-neutral-700 rounded-xl px-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white appearance-none"
                                     value={rentalForm.paymentStatus}
                                     onChange={(e) => setRentalForm({ ...rentalForm, paymentStatus: e.target.value as any })}
                                >
@@ -4128,23 +4140,23 @@ const App: React.FC = () => {
                                     <option value="Paid">Paid</option>
                                     <option value="Overdue">Overdue</option>
                                </select>
-                               <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-500 pointer-events-none" size={14} />
+                               <ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 text-neutral-500 pointer-events-none" size={16} />
                             </div>
                        </div>
                     </div>
 
-                    <div className="bg-neutral-900 p-4 rounded-xl border border-neutral-800">
-                        <div className="flex justify-between items-center mb-2">
-                            <span className="text-xs text-neutral-500">Rental Subtotal</span>
+                    <div className="bg-neutral-900 p-5 rounded-2xl border border-neutral-800">
+                        <div className="flex justify-between items-center mb-3">
+                            <span className="text-xs text-neutral-400">Rental Subtotal</span>
                             <span className="text-sm font-bold text-white">{formatCurrency(calculateRentalTotal())}</span>
                         </div>
-                        <div className="flex justify-between items-center mb-2">
-                            <span className="text-xs text-neutral-500">Delivery Fee</span>
+                        <div className="flex justify-between items-center mb-3">
+                            <span className="text-xs text-neutral-400">Delivery Fee</span>
                             <span className="text-sm font-bold text-white">{formatCurrency(rentalForm.deliveryFee)}</span>
                         </div>
-                        <div className="flex justify-between items-center pt-3 border-t border-neutral-800 mt-2">
+                        <div className="flex justify-between items-center pt-4 border-t border-neutral-800 mt-2">
                             <span className="text-sm font-bold text-white">Total Estimated</span>
-                            <span className="text-xl font-black text-blue-500">{formatCurrency(calculateRentalTotal() + rentalForm.deliveryFee)}</span>
+                            <span className="text-2xl font-black text-blue-500">{formatCurrency(calculateRentalTotal() + rentalForm.deliveryFee)}</span>
                         </div>
                     </div>
                   </div>
@@ -4153,12 +4165,12 @@ const App: React.FC = () => {
               </div>
 
               {/* Footer Actions */}
-              <div className="pt-4 border-t border-neutral-800 mt-4 flex items-center justify-between shrink-0">
+              <div className="p-5 md:p-8 border-t border-neutral-800 bg-[#0a0a0a] flex items-center justify-between shrink-0 z-10">
                   {rentalStep > 1 ? (
                     <button 
                       type="button" 
                       onClick={() => setRentalStep(s => s - 1)}
-                      className="px-4 py-3 rounded-xl font-bold text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors text-sm"
+                      className="px-6 py-3.5 rounded-xl font-bold text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors text-sm"
                     >
                       Back
                     </button>
@@ -4184,14 +4196,14 @@ const App: React.FC = () => {
                         }
                         setRentalStep(s => s + 1);
                       }}
-                      className="bg-blue-600 hover:bg-blue-500 text-white px-6 py-3 rounded-xl font-bold text-sm shadow-lg shadow-blue-600/20 transition-all active:scale-95 flex items-center"
+                      className="bg-blue-600 hover:bg-blue-500 text-white px-8 py-3.5 rounded-xl font-bold text-sm shadow-lg shadow-blue-600/20 transition-all active:scale-95 flex items-center"
                     >
-                      Next Step <ChevronRight size={16} className="ml-2" />
+                      Next Step <ChevronRight size={18} className="ml-2" />
                     </button>
                   ) : (
                     <button 
                       type="submit"
-                      className="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-3 rounded-xl font-bold text-sm shadow-lg shadow-emerald-600/20 transition-all active:scale-95 flex items-center"
+                      className="bg-emerald-600 hover:bg-emerald-500 text-white px-8 py-3.5 rounded-xl font-bold text-sm shadow-lg shadow-emerald-600/20 transition-all active:scale-95 flex items-center"
                     >
                       <CheckCircle2 size={18} className="mr-2" /> Create Contract
                     </button>
