@@ -1313,7 +1313,7 @@ const App: React.FC = () => {
       </aside>
 
       {/* Main Content */}
-      <main className="flex-1 overflow-y-auto h-full relative">
+      <main className="flex-1 overflow-y-auto h-full relative pb-24 md:pb-0">
         {/* Header */}
         <header className="bg-black/80 backdrop-blur-md border-b border-neutral-800/50 sticky top-0 z-30 flex items-center justify-between px-4 py-4 md:px-8 md:py-5">
            {isMobileSearchOpen ? (
@@ -3107,6 +3107,34 @@ const App: React.FC = () => {
           )}
         </div>
       </main>
+
+      {/* Mobile Bottom Navigation */}
+      <div className="md:hidden fixed bottom-0 left-0 right-0 bg-[#0a0a0a]/95 backdrop-blur-lg border-t border-neutral-800 z-50">
+        <div className="flex items-center overflow-x-auto no-scrollbar px-2 py-2 gap-1">
+           {[
+             { id: 'dashboard', icon: LayoutDashboard, label: 'Overview' },
+             { id: 'inventory', icon: Package, label: 'Fleet' },
+             { id: 'rentals', icon: History, label: 'Rentals' },
+             { id: 'customers', icon: Users, label: 'Clients' },
+             { id: 'purchasing', icon: Truck, label: 'Buy' },
+             { id: 'maintenance', icon: Hammer, label: 'Repair' },
+             { id: 'losses', icon: Ban, label: 'Losses' },
+           ].map((item) => (
+              <button
+                key={item.id}
+                onClick={() => setView(item.id as ViewType)}
+                className={`flex flex-col items-center justify-center min-w-[64px] flex-1 p-2 rounded-xl transition-all ${
+                  view === item.id 
+                    ? 'text-blue-500 bg-blue-500/10' 
+                    : 'text-neutral-500 hover:text-neutral-300'
+                }`}
+              >
+                <item.icon size={20} className="mb-1" />
+                <span className="text-[10px] font-medium tracking-wide whitespace-nowrap">{item.label}</span>
+              </button>
+           ))}
+        </div>
+      </div>
       
       {/* ... Maintenance, Delete Customer, Delete Inventory, Purchase History, New Customer, New Equipment, Purchase Modal, New Rental Modal ... */}
 
