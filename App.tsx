@@ -735,7 +735,7 @@ const App: React.FC = () => {
       deliveryAddress: rentalForm.deliveryAddress,
       deposit: rentalForm.deposit,
       deliveryFee: rentalForm.deliveryFee,
-      depositStatus: rentalForm.deposit > 0 ? 'Pending' : undefined
+      ...(rentalForm.deposit > 0 && { depositStatus: 'Pending' })
     };
 
     const addedRental = await addRental(newRentalData);
@@ -3812,9 +3812,8 @@ const App: React.FC = () => {
                 </button>
             </div>
 
-            <form onSubmit={handleCreateRental} className="flex-1 flex flex-col min-h-0">
-              {/* ... (Rental form content same as before) ... */}
-              <div className="flex-1 overflow-y-auto pr-2 space-y-6 touch-pan-y">
+            <form onSubmit={handleCreateRental} className="flex-1 flex flex-col min-h-0 bg-[#0a0a0a]">
+              <div className="flex-1 overflow-y-auto p-5 md:p-8 space-y-6 touch-pan-y">
                 
                 {/* Step 1: Client & Type */}
                 {rentalStep === 1 && (
