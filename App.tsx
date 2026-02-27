@@ -1556,14 +1556,18 @@ const App: React.FC = () => {
 
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-6">
                 {[
-                  { label: 'Total Fleet Investment', value: formatCurrency(stats.totalProcurement), icon: Wallet, color: 'text-emerald-400', bg: 'bg-emerald-500/10' },
-                  { label: 'Projected Revenue', value: formatCurrency(stats.totalRevenue), icon: TrendingUp, color: 'text-blue-400', bg: 'bg-blue-500/10' },
-                  { label: 'Total Clients', value: stats.totalCustomers, icon: Users, color: 'text-violet-400', bg: 'bg-violet-500/10' },
-                  { label: 'Critical Stock', value: stats.lowStockItems, icon: AlertTriangle, color: 'text-orange-400', bg: 'bg-orange-500/10' },
-                  { label: 'Damaged Items', value: totalDamagedItems, icon: Hammer, color: 'text-rose-400', bg: 'bg-rose-500/10' },
-                  { label: 'Items Lost (Missing)', value: totalMissingItems, icon: Ban, color: 'text-neutral-400', bg: 'bg-neutral-500/10' },
+                  { label: 'Total Fleet Investment', value: formatCurrency(stats.totalProcurement), icon: Wallet, color: 'text-emerald-400', bg: 'bg-emerald-500/10', onClick: () => setView('purchasing') },
+                  { label: 'Projected Revenue', value: formatCurrency(stats.totalRevenue), icon: TrendingUp, color: 'text-blue-400', bg: 'bg-blue-500/10', onClick: () => setView('rentals') },
+                  { label: 'Total Clients', value: stats.totalCustomers, icon: Users, color: 'text-violet-400', bg: 'bg-violet-500/10', onClick: () => setView('customers') },
+                  { label: 'Critical Stock', value: stats.lowStockItems, icon: AlertTriangle, color: 'text-orange-400', bg: 'bg-orange-500/10', onClick: () => setView('inventory') },
+                  { label: 'Damaged Items', value: totalDamagedItems, icon: Hammer, color: 'text-rose-400', bg: 'bg-rose-500/10', onClick: () => setView('maintenance') },
+                  { label: 'Items Lost (Missing)', value: totalMissingItems, icon: Ban, color: 'text-neutral-400', bg: 'bg-neutral-500/10', onClick: () => setView('losses') },
                 ].map((stat, i) => (
-                  <div key={i} className="bg-[#0a0a0a] p-6 rounded-3xl border border-neutral-800/50 shadow-sm hover:border-neutral-700 transition-all">
+                  <div 
+                    key={i} 
+                    onClick={stat.onClick}
+                    className="bg-[#0a0a0a] p-6 rounded-3xl border border-neutral-800/50 shadow-sm hover:border-neutral-700 transition-all duration-200 cursor-pointer hover:-translate-y-1 hover:shadow-lg hover:bg-neutral-900/50"
+                  >
                     <div className="flex items-center justify-between mb-4">
                       <div className={`${stat.bg} ${stat.color} p-3 rounded-2xl`}>
                         <stat.icon size={22} />
@@ -3569,14 +3573,14 @@ const App: React.FC = () => {
           <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setIsPurchaseModalOpen(false)} />
           <div className={`relative w-[95%] ${isBulkMode ? 'max-w-5xl' : 'max-w-md'} bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden transition-all duration-300`}>
             {/* ... existing purchase modal content ... */}
-            <div className="flex items-center justify-between mb-8">
+            <div className="flex flex-col md:flex-row md:items-center justify-between mb-8 gap-4 md:gap-0">
                 <div>
                   <h2 className="text-xl font-bold flex items-center">
                       <Truck size={20} className="mr-2 text-emerald-500" /> {isBulkMode ? 'Bulk Fleet Procurement' : 'New Resupply Order'}
                   </h2>
-                  <p className="text-xs text-neutral-500 mt-1">Populate your inventory with new high-quality equipment.</p>
+                  <p className="text-sm text-neutral-500 mt-1 mb-2">Streamline your inventory intake by adding multiple assets at once.</p>
                 </div>
-                <div className="flex items-center space-x-4">
+                <div className="flex items-center justify-between md:justify-end space-x-4 w-full md:w-auto">
                   <div className="flex items-center space-x-2 bg-neutral-900 px-3 py-1.5 rounded-xl border border-neutral-800">
                     <span className={`text-[10px] font-black uppercase tracking-widest ${!isBulkMode ? 'text-blue-400' : 'text-neutral-600'}`}>Single</span>
                     <button 
@@ -3598,17 +3602,20 @@ const App: React.FC = () => {
                   <div className="space-y-6">
                     <div>
                         <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-2">Select Equipment</label>
-                        <select 
-                            required
-                            className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-emerald-500 outline-none transition-all text-white"
-                            value={singlePurchase.itemId}
-                            onChange={(e) => setSinglePurchase({...singlePurchase, itemId: e.target.value})}
-                        >
-                            <option value="">Select Item...</option>
-                            {inventory.map(item => (
-                                <option key={item.id} value={item.id}>{item.name} ({item.category})</option>
-                            ))}
-                        </select>
+                        <div className="relative">
+                            <select 
+                                required
+                                className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-emerald-500 outline-none transition-all text-white appearance-none"
+                                value={singlePurchase.itemId}
+                                onChange={(e) => setSinglePurchase({...singlePurchase, itemId: e.target.value})}
+                            >
+                                <option value="">Select Item...</option>
+                                {inventory.map(item => (
+                                    <option key={item.id} value={item.id}>{item.name} ({item.category})</option>
+                                ))}
+                            </select>
+                            <ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 text-neutral-500 pointer-events-none" size={16} />
+                        </div>
                     </div>
 
                     <div>
@@ -3679,7 +3686,7 @@ const App: React.FC = () => {
                     </div>
                   </div>
                 ) : (
-                  <div className="space-y-4 max-h-[60vh] overflow-y-auto pr-2 custom-scrollbar relative">
+                  <div className="space-y-4 max-h-[60vh] overflow-y-auto px-1 md:px-4 custom-scrollbar relative -mx-1 md:mx-0">
                     {/* Desktop Headers - Hidden on Mobile */}
                     <div className="hidden md:grid grid-cols-12 gap-3 px-3 py-2 sticky top-0 bg-[#0a0a0a] z-10 border-b border-neutral-800 mb-2">
                         <div className="col-span-3 text-[9px] font-black text-neutral-500 uppercase tracking-widest">Equipment</div>
@@ -3690,37 +3697,39 @@ const App: React.FC = () => {
                         <div className="col-span-1"></div>
                     </div>
 
-                    <div className="space-y-4 md:space-y-2">
+                    <div className="space-y-4 md:space-y-2 px-1 md:px-0">
                       {bulkRows.map((row, index) => (
                         <div key={row.id} className="relative bg-neutral-900/40 hover:bg-neutral-800/40 p-4 md:p-2 rounded-xl border border-neutral-800/50 transition-colors group">
-                           {/* Mobile Delete Button */}
-                           <button 
-                              type="button"
-                              onClick={() => removeBulkRow(row.id)}
-                              className="md:hidden absolute top-3 right-3 p-2 text-neutral-500 hover:text-rose-500 bg-neutral-800/50 rounded-lg"
-                           >
-                              <Trash2 size={14} />
-                           </button>
-
                            {/* Responsive Grid */}
                            <div className="grid grid-cols-1 md:grid-cols-12 gap-4 md:gap-3 md:items-center">
                               
                               {/* Item ID */}
                               <div className="col-span-1 md:col-span-3">
                                 <label className="md:hidden block text-[9px] font-black text-neutral-500 uppercase tracking-widest mb-1.5">Equipment</label>
-                                <div className="relative">
-                                  <select 
-                                    required
-                                    className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2.5 md:py-2 text-sm md:text-xs focus:ring-1 focus:ring-emerald-500 outline-none text-white appearance-none"
-                                    value={row.itemId}
-                                    onChange={(e) => updateBulkRow(row.id, 'itemId', e.target.value)}
+                                <div className="flex flex-row items-end gap-3">
+                                  <div className="relative flex-1">
+                                    <select 
+                                      required
+                                      className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2.5 md:py-2 text-sm md:text-xs focus:ring-1 focus:ring-emerald-500 outline-none text-white appearance-none"
+                                      value={row.itemId}
+                                      onChange={(e) => updateBulkRow(row.id, 'itemId', e.target.value)}
+                                    >
+                                      <option value="">Select Item...</option>
+                                      {inventory.map(item => (
+                                          <option key={item.id} value={item.id}>{item.name}</option>
+                                      ))}
+                                    </select>
+                                    <ChevronDown className="md:hidden absolute right-3 top-1/2 -translate-y-1/2 text-neutral-500 pointer-events-none" size={14} />
+                                  </div>
+                                  
+                                  {/* Mobile Delete Button */}
+                                  <button 
+                                      type="button"
+                                      onClick={() => removeBulkRow(row.id)}
+                                      className="md:hidden flex-shrink-0 h-10 w-10 flex items-center justify-center text-neutral-500 hover:text-rose-500 bg-neutral-800/50 rounded-lg"
                                   >
-                                    <option value="">Select Item...</option>
-                                    {inventory.map(item => (
-                                        <option key={item.id} value={item.id}>{item.name}</option>
-                                    ))}
-                                  </select>
-                                  <ChevronDown className="md:hidden absolute right-3 top-1/2 -translate-y-1/2 text-neutral-500 pointer-events-none" size={14} />
+                                      <Trash2 size={16} />
+                                  </button>
                                 </div>
                               </div>
 
@@ -3789,10 +3798,10 @@ const App: React.FC = () => {
                                  <button 
                                     type="button"
                                     onClick={() => removeBulkRow(row.id)}
-                                    className="p-1.5 text-neutral-600 hover:text-rose-500 hover:bg-rose-500/10 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                                    className="h-10 w-10 flex items-center justify-center text-neutral-600 hover:text-rose-500 hover:bg-rose-500/10 rounded-lg transition-all opacity-0 group-hover:opacity-100"
                                     title="Remove item"
                                  >
-                                    <Trash2 size={14} />
+                                    <Trash2 size={16} />
                                  </button>
                               </div>
                            </div>
@@ -3931,7 +3940,7 @@ const App: React.FC = () => {
                         <input 
                           required
                           type="date"
-                          className="w-full bg-neutral-900 border border-neutral-800 rounded-xl pl-12 pr-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white appearance-none [color-scheme:dark] text-left"
+                          className="w-full h-12 bg-neutral-900 border border-neutral-800 rounded-xl pl-12 pr-4 py-3 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white appearance-none [color-scheme:dark] text-left"
                           value={rentalForm.startDate}
                           onChange={(e) => {
                                const newStart = e.target.value;
@@ -3960,7 +3969,7 @@ const App: React.FC = () => {
                               <input 
                                   required
                                   type="date"
-                                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl pl-12 pr-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white appearance-none [color-scheme:dark] text-left"
+                                  className="w-full h-12 bg-neutral-900 border border-neutral-800 rounded-xl pl-12 pr-4 py-3 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white appearance-none [color-scheme:dark] text-left"
                                   value={rentalForm.endDate}
                                   min={rentalForm.startDate}
                                   onChange={(e) => setRentalForm({ ...rentalForm, endDate: e.target.value })}
@@ -4300,7 +4309,7 @@ const App: React.FC = () => {
                              <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1">Actual Return Date</label>
                              <input 
                                 type="date"
-                                className="w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-1.5 text-xs focus:ring-1 focus:ring-blue-500 outline-none text-white [color-scheme:dark]"
+                                className="w-full h-12 bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-3 text-base md:text-sm focus:ring-1 focus:ring-blue-500 outline-none text-white appearance-none [color-scheme:dark] text-left"
                                 value={returnDate}
                                 onChange={(e) => setReturnDate(e.target.value)}
                             />
@@ -4526,6 +4535,74 @@ const App: React.FC = () => {
                     className="w-full py-4 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-2xl shadow-lg shadow-blue-900/20 transition-all active:scale-95"
                 >
                     COMPLETE RETURN & UPDATE INVENTORY
+                </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Extend Rental Modal */}
+      {isExtendModalOpen && rentalToExtend && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setIsExtendModalOpen(false)} />
+          <div className="relative w-[95%] max-w-lg bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col">
+            <div className="flex items-center justify-between mb-8 shrink-0">
+              <div>
+                <h2 className="text-xl font-bold flex items-center">
+                  <CalendarClock size={20} className="mr-2 text-amber-500" /> Extend Rental
+                </h2>
+                <p className="text-xs text-neutral-500 mt-1">Modify the contract duration and update costs.</p>
+              </div>
+              <button onClick={() => setIsExtendModalOpen(false)} className="text-neutral-500 hover:text-white transition-colors">
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="space-y-6">
+                <div className="bg-neutral-900/50 rounded-xl p-4 border border-neutral-800/50 flex flex-col gap-4">
+                    <div className="flex justify-between items-center">
+                        <div>
+                            <div className="text-[10px] font-black text-neutral-500 uppercase tracking-widest">Transaction</div>
+                            <div className="text-sm font-mono font-bold text-blue-400">#{rentalToExtend.id.slice(0,8).toUpperCase()}...</div>
+                        </div>
+                        <div className="text-right">
+                            <div className="text-[10px] font-black text-neutral-500 uppercase tracking-widest">Current End Date</div>
+                            <div className="text-sm font-bold text-white">{rentalToExtend.endDate}</div>
+                        </div>
+                    </div>
+                    
+                    <div>
+                         <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1">New End Date</label>
+                         <input 
+                            type="date"
+                            className="w-full h-12 bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-3 text-base md:text-sm focus:ring-1 focus:ring-amber-500 outline-none text-white appearance-none [color-scheme:dark] text-left"
+                            value={extensionDate}
+                            min={rentalToExtend.startDate}
+                            onChange={(e) => setExtensionDate(e.target.value)}
+                        />
+                    </div>
+                </div>
+
+                <div className="bg-neutral-900/30 rounded-xl p-5 border border-neutral-800/50">
+                   <div className="flex justify-between items-center mb-2">
+                       <span className="text-xs text-neutral-400">Current Contract Value</span>
+                       <span className="text-sm font-bold text-white">{formatCurrency(rentalToExtend.totalCost)}</span>
+                   </div>
+                   <div className="flex justify-between items-center mb-4 pb-4 border-b border-neutral-800/50">
+                       <span className="text-xs text-neutral-400">Additional Cost</span>
+                       <span className="text-sm font-bold text-amber-500">+{formatCurrency(calculateExtensionFinancials().additionalCost)}</span>
+                   </div>
+                   <div className="flex justify-between items-center">
+                       <span className="text-xs font-black text-neutral-500 uppercase tracking-widest">New Total Contract</span>
+                       <span className="text-xl font-black text-white">{formatCurrency(calculateExtensionFinancials().newTotal)}</span>
+                   </div>
+                </div>
+                
+                <button 
+                    onClick={handleProcessExtension}
+                    className="w-full py-4 bg-amber-500 hover:bg-amber-400 text-black font-bold rounded-2xl shadow-lg shadow-amber-900/20 transition-all active:scale-95 flex items-center justify-center"
+                >
+                    <CheckCircle2 size={18} className="mr-2" /> CONFIRM EXTENSION
                 </button>
             </div>
           </div>
