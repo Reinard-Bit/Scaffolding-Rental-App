@@ -238,6 +238,19 @@ const App: React.FC = () => {
   // AI State
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [aiAnalysis, setAiAnalysis] = useState<string | null>(null);
+  
+  // Submission State
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isStep4Ready, setIsStep4Ready] = useState(false);
+
+  // Delay Step 4 button activation to prevent accidental double-clicks
+  useEffect(() => {
+    if (rentalStep === 4) {
+      setIsStep4Ready(false);
+      const timer = setTimeout(() => setIsStep4Ready(true), 800);
+      return () => clearTimeout(timer);
+    }
+  }, [rentalStep]);
 
   // --- Initial Data Load from Firestore ---
   useEffect(() => {
@@ -518,7 +531,7 @@ const App: React.FC = () => {
 
   // --- Purchase Logic ---
   const addBulkRow = () => {
-    setBulkRows([...bulkRows, { id: Date.now().toString(), itemId: '', supplier: '', quantity: 1, purchasePrice: 0, paymentStatus: 'Paid' }]);
+    setBulkRows([...bulkRows, { id: Math.random().toString(36).substr(2, 9), itemId: '', supplier: '', quantity: 1, purchasePrice: 0, paymentStatus: 'Paid' }]);
   };
 
   const removeBulkRow = (id: string) => {
@@ -580,7 +593,7 @@ const App: React.FC = () => {
       customerId: '',
       startDate: new Date().toISOString().split('T')[0],
       endDate: '',
-      items: [{ id: Date.now().toString(), itemId: '', quantity: 1 }],
+      items: [{ id: Math.random().toString(36).substr(2, 9), itemId: '', quantity: 1 }],
       rateType: 'Daily',
       manualMonths: 1,
       deliveryAddress: '',
@@ -596,7 +609,7 @@ const App: React.FC = () => {
   const addRentalItemRow = () => {
     setRentalForm(prev => ({
       ...prev,
-      items: [...prev.items, { id: Date.now().toString(), itemId: '', quantity: 1 }]
+      items: [...prev.items, { id: Math.random().toString(36).substr(2, 9), itemId: '', quantity: 1 }]
     }));
   };
 
@@ -647,7 +660,7 @@ const App: React.FC = () => {
             };
         } else {
             currentItems.push({
-                id: `auto-set-${Date.now()}-${itemId}`,
+                id: `auto-set-${Math.random().toString(36).substr(2, 9)}-${itemId}`,
                 itemId,
                 quantity: qtyToAdd
             });
@@ -655,7 +668,7 @@ const App: React.FC = () => {
      });
 
      if (currentItems.length === 0) {
-         currentItems.push({ id: Date.now().toString(), itemId: '', quantity: 1 });
+         currentItems.push({ id: Math.random().toString(36).substr(2, 9), itemId: '', quantity: 1 });
      }
 
      setRentalForm(prev => ({ ...prev, items: currentItems }));
@@ -708,62 +721,90 @@ const App: React.FC = () => {
 
   const handleCreateRental = async (e: React.FormEvent) => {
     e.preventDefault();
+    
+    // Prevent submission if not on the final step
+    if (rentalStep !== 4) return;
+    
+    // Prevent double submission
+    if (isSubmitting) return;
+
     if (!rentalForm.customerId || !rentalForm.startDate || !rentalForm.endDate || !rentalForm.deliveryAddress) return;
 
-    // Validate Items
-    const validItems = rentalForm.items.filter(i => i.itemId && i.quantity > 0);
-    if (validItems.length === 0) return;
+    setIsSubmitting(true);
 
-    // Check Stock Availability
-    for (const row of validItems) {
-      const item = inventory.find(i => i.id === row.itemId);
-      if (!item) continue;
-      if (row.quantity > item.availableQuantity) {
-        alert(`Insufficient stock for ${item.name}. Available: ${item.availableQuantity}`);
-        return;
-      }
-    }
+    try {
+        // Validate Items
+        const validItems = rentalForm.items.filter(i => i.itemId && i.quantity > 0);
+        if (validItems.length === 0) return;
 
-    const newRentalData: Omit<Rental, "id"> = {
-      customerId: rentalForm.customerId,
-      items: validItems.map(({ itemId, quantity }) => ({ itemId, quantity })),
-      startDate: rentalForm.startDate,
-      endDate: rentalForm.endDate,
-      status: RentalStatus.ACTIVE,
-      paymentStatus: rentalForm.paymentStatus,
-      totalCost: calculateRentalTotal(),
-      deliveryAddress: rentalForm.deliveryAddress,
-      deposit: rentalForm.deposit,
-      deliveryFee: rentalForm.deliveryFee,
-      ...(rentalForm.deposit > 0 && { depositStatus: 'Pending' })
-    };
+        // Aggregate duplicate items
+        const aggregatedItemsMap = new Map<string, number>();
+        for (const item of validItems) {
+            const current = aggregatedItemsMap.get(item.itemId) || 0;
+            aggregatedItemsMap.set(item.itemId, current + item.quantity);
+        }
+        
+        const aggregatedItems = Array.from(aggregatedItemsMap.entries()).map(([itemId, quantity]) => ({
+            itemId,
+            quantity
+        }));
 
-    const addedRental = await addRental(newRentalData);
-    setRentals([addedRental, ...rentals]);
+        // Check Stock Availability
+        for (const row of aggregatedItems) {
+          const item = inventory.find(i => i.id === row.itemId);
+          if (!item) continue;
+          if (row.quantity > item.availableQuantity) {
+            alert(`Insufficient stock for ${item.name}. Available: ${item.availableQuantity}`);
+            return;
+          }
+        }
 
-    // Update Inventory Stock
-    const inventoryUpdates = new Map<string, number>();
-    validItems.forEach(i => {
-      inventoryUpdates.set(i.itemId, i.quantity);
-    });
-
-    // We must update DB one by one
-    const updatedInventory = [...inventory];
-    for (const item of updatedInventory) {
-      const deductQty = inventoryUpdates.get(item.id);
-      if (deductQty) {
-        const newItemState = {
-            ...item,
-            availableQuantity: item.availableQuantity - deductQty
+        const newRentalData: Omit<Rental, "id"> = {
+          customerId: rentalForm.customerId,
+          items: aggregatedItems,
+          startDate: rentalForm.startDate,
+          endDate: rentalForm.endDate,
+          status: RentalStatus.ACTIVE,
+          paymentStatus: rentalForm.paymentStatus,
+          totalCost: calculateRentalTotal(),
+          deliveryAddress: rentalForm.deliveryAddress,
+          deposit: rentalForm.deposit,
+          deliveryFee: rentalForm.deliveryFee,
+          ...(rentalForm.deposit > 0 && { depositStatus: 'Pending' })
         };
-        await updateInventoryItem(newItemState);
-        // Sync local
-        Object.assign(item, newItemState);
-      }
-    }
-    setInventory([...updatedInventory]);
 
-    setIsRentalModalOpen(false);
+        const addedRental = await addRental(newRentalData);
+        setRentals([addedRental, ...rentals]);
+
+        // Update Inventory Stock
+        const inventoryUpdates = new Map<string, number>();
+        aggregatedItems.forEach(i => {
+          inventoryUpdates.set(i.itemId, i.quantity);
+        });
+
+        // We must update DB one by one
+        const updatedInventory = [...inventory];
+        for (const item of updatedInventory) {
+          const deductQty = inventoryUpdates.get(item.id);
+          if (deductQty) {
+            const newItemState = {
+                ...item,
+                availableQuantity: item.availableQuantity - deductQty
+            };
+            await updateInventoryItem(newItemState);
+            // Sync local
+            Object.assign(item, newItemState);
+          }
+        }
+        setInventory([...updatedInventory]);
+
+        setIsRentalModalOpen(false);
+    } catch (error) {
+        console.error("Failed to create rental:", error);
+        alert("An error occurred while creating the rental contract.");
+    } finally {
+        setIsSubmitting(false);
+    }
   };
 
   const cyclePaymentStatus = async (e: React.MouseEvent, rentalId: string, currentStatus: string) => {
@@ -882,7 +923,12 @@ const App: React.FC = () => {
     // Initialize quantities with assumption all are good
     const initialQty: Record<string, { good: number, damaged: number, missing: number }> = {};
     rental.items.forEach(item => {
-      initialQty[item.itemId] = { good: item.quantity, damaged: 0, missing: 0 };
+      const current = initialQty[item.itemId] || { good: 0, damaged: 0, missing: 0 };
+      initialQty[item.itemId] = { 
+          good: current.good + item.quantity, 
+          damaged: 0, 
+          missing: 0 
+      };
     });
     setReturnQuantities(initialQty);
     
@@ -1001,9 +1047,9 @@ const App: React.FC = () => {
           status: RentalStatus.RETURNED,
           endDate: returnDate,
           totalCost: total,
-          lateFee: lateFee > 0 ? lateFee : undefined,
+          ...(lateFee > 0 && { lateFee }),
           returnSnapshot: snapshot,
-          depositStatus: depositStatus,
+          ...(depositStatus && { depositStatus }),
           refundedAmount: refundAmount
     };
 
@@ -3881,11 +3927,11 @@ const App: React.FC = () => {
                     <div>
                       <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">Start Date</label>
                       <div className="relative">
-                        <Calendar className="absolute left-4 top-1/2 -translate-y-1/2 text-neutral-500" size={18} />
+                        <Calendar className="absolute left-4 top-1/2 -translate-y-1/2 text-neutral-500 pointer-events-none" size={18} />
                         <input 
                           required
                           type="date"
-                          className="w-full bg-neutral-900 border border-neutral-800 rounded-xl pl-12 pr-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white [color-scheme:dark]"
+                          className="w-full bg-neutral-900 border border-neutral-800 rounded-xl pl-12 pr-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white appearance-none [color-scheme:dark] text-left"
                           value={rentalForm.startDate}
                           onChange={(e) => {
                                const newStart = e.target.value;
@@ -3910,11 +3956,11 @@ const App: React.FC = () => {
                           <>
                               <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">End Date</label>
                               <div className="relative">
-                              <Calendar className="absolute left-4 top-1/2 -translate-y-1/2 text-neutral-500" size={18} />
+                              <Calendar className="absolute left-4 top-1/2 -translate-y-1/2 text-neutral-500 pointer-events-none" size={18} />
                               <input 
                                   required
                                   type="date"
-                                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl pl-12 pr-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white [color-scheme:dark]"
+                                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl pl-12 pr-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white appearance-none [color-scheme:dark] text-left"
                                   value={rentalForm.endDate}
                                   min={rentalForm.startDate}
                                   onChange={(e) => setRentalForm({ ...rentalForm, endDate: e.target.value })}
@@ -4168,7 +4214,10 @@ const App: React.FC = () => {
                   {rentalStep > 1 ? (
                     <button 
                       type="button" 
-                      onClick={() => setRentalStep(s => s - 1)}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        setRentalStep(s => s - 1);
+                      }}
                       className="px-6 py-3.5 rounded-xl font-bold text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors text-sm"
                     >
                       Back
@@ -4180,7 +4229,8 @@ const App: React.FC = () => {
                   {rentalStep < 4 ? (
                     <button 
                       type="button"
-                      onClick={() => {
+                      onClick={(e) => {
+                        e.preventDefault();
                         if (rentalStep === 1 && !rentalForm.customerId) {
                           alert("Please select a client.");
                           return;
@@ -4202,9 +4252,11 @@ const App: React.FC = () => {
                   ) : (
                     <button 
                       type="submit"
-                      className="bg-emerald-600 hover:bg-emerald-500 text-white px-8 py-3.5 rounded-xl font-bold text-sm shadow-lg shadow-emerald-600/20 transition-all active:scale-95 flex items-center"
+                      disabled={!isStep4Ready || isSubmitting}
+                      className={`bg-emerald-600 hover:bg-emerald-500 text-white px-8 py-3.5 rounded-xl font-bold text-sm shadow-lg shadow-emerald-600/20 transition-all active:scale-95 flex items-center ${(!isStep4Ready || isSubmitting) ? 'opacity-50 cursor-not-allowed' : ''}`}
                     >
-                      <CheckCircle2 size={18} className="mr-2" /> Create Contract
+                      {isSubmitting ? <Loader2 className="animate-spin mr-2" size={18} /> : <CheckCircle2 size={18} className="mr-2" />} 
+                      Create Contract
                     </button>
                   )}
               </div>
@@ -4289,17 +4341,23 @@ const App: React.FC = () => {
                         <div className="col-span-1 text-center">Total</div>
                     </div>
 
-                    {rentalToReturn.items.map(item => {
-                        const invItem = inventory.find(i => i.id === item.itemId);
-                        const qty = returnQuantities[item.itemId] || { good: 0, damaged: 0, missing: 0 };
+                    {Object.keys(returnQuantities).map(itemId => {
+                        const invItem = inventory.find(i => i.id === itemId);
+                        const qty = returnQuantities[itemId];
                         const currentTotal = qty.good + qty.damaged + qty.missing;
-                        const isBalanced = currentTotal === item.quantity;
+                        
+                        // Calculate original total from all rows (handling duplicates)
+                        const originalTotal = rentalToReturn.items
+                            .filter(i => i.itemId === itemId)
+                            .reduce((sum, i) => sum + i.quantity, 0);
+                            
+                        const isBalanced = currentTotal === originalTotal;
 
                         return (
-                            <div key={item.itemId} className="grid grid-cols-12 gap-2 md:gap-4 items-center bg-neutral-900/20 p-3 rounded-xl border border-neutral-800/30">
+                            <div key={itemId} className="grid grid-cols-12 gap-2 md:gap-4 items-center bg-neutral-900/20 p-3 rounded-xl border border-neutral-800/30">
                                 <div className="col-span-5">
                                     <div className="text-sm font-bold text-white truncate">{invItem?.name}</div>
-                                    <div className="text-[10px] text-neutral-500">Rented: {item.quantity} Units</div>
+                                    <div className="text-[10px] text-neutral-500">Rented: {originalTotal} Units</div>
                                 </div>
                                 <div className="col-span-2">
                                     <input 
@@ -4307,7 +4365,7 @@ const App: React.FC = () => {
                                         min="0"
                                         className="w-full bg-emerald-500/10 border border-emerald-500/20 rounded-lg px-1 md:px-2 py-2 text-center text-xs font-bold text-emerald-400 focus:ring-1 focus:ring-emerald-500 outline-none"
                                         value={qty.good}
-                                        onChange={(e) => updateReturnQty(item.itemId, 'good', parseInt(e.target.value) || 0)}
+                                        onChange={(e) => updateReturnQty(itemId, 'good', parseInt(e.target.value) || 0)}
                                     />
                                 </div>
                                 <div className="col-span-2">
@@ -4316,7 +4374,7 @@ const App: React.FC = () => {
                                         min="0"
                                         className="w-full bg-amber-500/10 border border-amber-500/20 rounded-lg px-1 md:px-2 py-2 text-center text-xs font-bold text-amber-400 focus:ring-1 focus:ring-amber-500 outline-none"
                                         value={qty.damaged}
-                                        onChange={(e) => updateReturnQty(item.itemId, 'damaged', parseInt(e.target.value) || 0)}
+                                        onChange={(e) => updateReturnQty(itemId, 'damaged', parseInt(e.target.value) || 0)}
                                     />
                                 </div>
                                 <div className="col-span-2">
@@ -4325,14 +4383,14 @@ const App: React.FC = () => {
                                         min="0"
                                         className="w-full bg-rose-500/10 border border-rose-500/20 rounded-lg px-1 md:px-2 py-2 text-center text-xs font-bold text-rose-400 focus:ring-1 focus:ring-rose-500 outline-none"
                                         value={qty.missing}
-                                        onChange={(e) => updateReturnQty(item.itemId, 'missing', parseInt(e.target.value) || 0)}
+                                        onChange={(e) => updateReturnQty(itemId, 'missing', parseInt(e.target.value) || 0)}
                                     />
                                 </div>
                                 <div className="col-span-1 flex justify-center">
                                     {isBalanced ? (
                                         <CheckCircle2 size={16} className="text-neutral-600" />
                                     ) : (
-                                        <span className="text-[10px] font-bold text-rose-500">{currentTotal}/{item.quantity}</span>
+                                        <span className="text-[10px] font-bold text-rose-500">{currentTotal}/{originalTotal}</span>
                                     )}
                                 </div>
                             </div>
@@ -4346,10 +4404,10 @@ const App: React.FC = () => {
                       <TrendingUp size={14} className="mr-2 text-blue-500" /> Projected Inventory Updates
                    </h4>
                    <div className="space-y-3">
-                      {rentalToReturn.items.map(item => {
-                          const invItem = inventory.find(i => i.id === item.itemId);
+                      {Object.keys(returnQuantities).map(itemId => {
+                          const invItem = inventory.find(i => i.id === itemId);
                           if (!invItem) return null;
-                          const qty = returnQuantities[item.itemId] || { good: 0, damaged: 0, missing: 0 };
+                          const qty = returnQuantities[itemId];
                           
                           // Projections
                           const newAvailable = invItem.availableQuantity + qty.good;
@@ -4357,7 +4415,7 @@ const App: React.FC = () => {
                           const newTotal = invItem.totalQuantity - qty.missing;
 
                           return (
-                              <div key={item.itemId} className="bg-neutral-900/50 p-3 rounded-lg border border-neutral-800/50">
+                              <div key={itemId} className="bg-neutral-900/50 p-3 rounded-lg border border-neutral-800/50">
                                   <p className="text-xs font-bold text-neutral-300 mb-2">{invItem.name}</p>
                                   <div className="grid grid-cols-3 gap-2">
                                       {/* Available */}
