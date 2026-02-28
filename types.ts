@@ -68,14 +68,26 @@ export interface Rental {
   refundedAmount?: number;
 }
 
-export interface Purchase {
-  id: string;
+export interface PurchaseItem {
   itemId: string;
-  supplier: string;
   quantity: number;
   purchasePrice: number;
+}
+
+export interface Purchase {
+  id: string;
+  supplier: string;
   purchaseDate: string;
   paymentStatus: 'Paid' | 'Pending';
+  
+  // Legacy fields (for single item purchases)
+  itemId?: string;
+  quantity?: number;
+  purchasePrice?: number;
+
+  // New fields (for bulk purchases)
+  items?: PurchaseItem[];
+  totalCost?: number;
 }
 
 export type ViewType = 'dashboard' | 'inventory' | 'customers' | 'rentals' | 'purchasing' | 'maintenance' | 'losses';

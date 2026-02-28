@@ -196,6 +196,8 @@ const App: React.FC = () => {
     paymentStatus: 'Paid'
   });
 
+  const [procurementDate, setProcurementDate] = useState<string>(new Date().toISOString().split('T')[0]);
+
   const [newCustomer, setNewCustomer] = useState({
     name: '',
     company: '',
@@ -381,7 +383,7 @@ const App: React.FC = () => {
 
   const stats = {
     totalRevenue: rentals.reduce((acc, r) => acc + r.totalCost + (r.lateFee || 0) + (r.deliveryFee || 0), 0),
-    totalProcurement: purchases.reduce((acc, p) => acc + p.purchasePrice, 0),
+    totalProcurement: purchases.reduce((acc, p) => acc + (p.totalCost || p.purchasePrice || 0), 0),
     activeRentals: rentals.filter(r => r.status === RentalStatus.ACTIVE).length,
     overdueRentals: rentals.filter(r => r.status === RentalStatus.OVERDUE).length,
     lowStockItems: inventory.filter(i => i.totalQuantity > 0 && (i.availableQuantity / i.totalQuantity) < 0.2).length,
@@ -554,16 +556,31 @@ const App: React.FC = () => {
       if (!purchaseToDelete) return;
 
       // 1. Revert Inventory (Subtract the purchased quantity)
-      const item = inventory.find(i => i.id === purchaseToDelete.itemId);
-      if (item) {
-           const updatedItem = {
-              ...item,
-              totalQuantity: Math.max(0, item.totalQuantity - purchaseToDelete.quantity),
-              availableQuantity: Math.max(0, item.availableQuantity - purchaseToDelete.quantity)
-           };
-           // Update Inventory in DB and State
-           await updateInventoryItem(updatedItem);
-           setInventory(prev => prev.map(i => i.id === item.id ? updatedItem : i));
+      if (purchaseToDelete.items && purchaseToDelete.items.length > 0) {
+          for (const pItem of purchaseToDelete.items) {
+              const item = inventory.find(i => i.id === pItem.itemId);
+              if (item) {
+                  const updatedItem = {
+                      ...item,
+                      totalQuantity: Math.max(0, item.totalQuantity - pItem.quantity),
+                      availableQuantity: Math.max(0, item.availableQuantity - pItem.quantity)
+                  };
+                  await updateInventoryItem(updatedItem);
+                  setInventory(prev => prev.map(i => i.id === item.id ? updatedItem : i));
+              }
+          }
+      } else if (purchaseToDelete.itemId) {
+          const item = inventory.find(i => i.id === purchaseToDelete.itemId);
+          if (item) {
+               const updatedItem = {
+                  ...item,
+                  totalQuantity: Math.max(0, item.totalQuantity - (purchaseToDelete.quantity || 0)),
+                  availableQuantity: Math.max(0, item.availableQuantity - (purchaseToDelete.quantity || 0))
+               };
+               // Update Inventory in DB and State
+               await updateInventoryItem(updatedItem);
+               setInventory(prev => prev.map(i => i.id === item.id ? updatedItem : i));
+          }
       }
 
       // 2. Delete Purchase from DB
@@ -1136,7 +1153,7 @@ const App: React.FC = () => {
 
   const handleResupply = async (e: React.FormEvent) => {
     e.preventDefault();
-    const purchaseDate = new Date().toISOString().split('T')[0];
+    const purchaseDate = procurementDate;
     const newPurchasesList: Purchase[] = [];
     const inventoryUpdateMap: Record<string, number> = {};
 
@@ -1144,21 +1161,29 @@ const App: React.FC = () => {
       const validRows = bulkRows.filter(row => row.itemId && row.supplier);
       if (validRows.length === 0) return;
 
-      const transactionId = Date.now().toString();
-      // We'll treat bulk as separate records in Firestore for easier query, or you could do a subcollection
-      // keeping flat for now
-      for(let i=0; i<validRows.length; i++) {
+      const supplierName = validRows[0].supplier; // Use the first row's supplier as the main supplier
+      const totalCost = validRows.reduce((sum, row) => sum + row.purchasePrice, 0);
+      const paymentStatus = validRows.every(row => row.paymentStatus === 'Paid') ? 'Paid' : 'Pending';
+
+      const items = validRows.map(row => ({
+        itemId: row.itemId,
+        quantity: row.quantity,
+        purchasePrice: row.purchasePrice
+      }));
+
+      const pData = {
+        supplier: supplierName,
+        purchaseDate,
+        paymentStatus,
+        items,
+        totalCost
+      };
+
+      const addedP = await addPurchase(pData);
+      newPurchasesList.push(addedP);
+
+      for (let i = 0; i < validRows.length; i++) {
         const row = validRows[i];
-         const pData = {
-          itemId: row.itemId,
-          supplier: row.supplier,
-          quantity: row.quantity,
-          purchasePrice: row.purchasePrice,
-          purchaseDate,
-          paymentStatus: row.paymentStatus
-        };
-        const addedP = await addPurchase(pData);
-        newPurchasesList.push(addedP);
         inventoryUpdateMap[row.itemId] = (inventoryUpdateMap[row.itemId] || 0) + row.quantity;
       }
     } else {
@@ -1197,6 +1222,7 @@ const App: React.FC = () => {
     // Reset forms
     setSinglePurchase({ itemId: '', supplier: '', quantity: 1, purchasePrice: 0, paymentStatus: 'Paid' });
     setBulkRows([{ id: '1', itemId: '', supplier: '', quantity: 1, purchasePrice: 0, paymentStatus: 'Paid' }]);
+    setProcurementDate(new Date().toISOString().split('T')[0]);
   };
 
   const toggleGroup = (groupId: string) => {
@@ -1238,7 +1264,11 @@ const App: React.FC = () => {
     const matchesSearch = (
       p.supplier.toLowerCase().includes(term) ||
       (item && item.name.toLowerCase().includes(term)) ||
-      p.id.toLowerCase().includes(term)
+      p.id.toLowerCase().includes(term) ||
+      (p.items && p.items.some(pi => {
+        const i = inventory.find(inv => inv.id === pi.itemId);
+        return i && i.name.toLowerCase().includes(term);
+      }))
     );
 
     return matchesSearch && matchesStatus;
@@ -2158,17 +2188,19 @@ const App: React.FC = () => {
                 {/* Mobile/Tablet List View */}
                 <div className="md:hidden space-y-4">
                   {Array.from(groupedPurchases.entries()).map(([baseId, group]) => {
-                      const isBulkGroup = group.length > 1;
-                      const isExpanded = expandedGroups.has(baseId);
+                      const isLegacyBulkGroup = group.length > 1;
                       const firstItem = group[0];
-                      const itemDetails = inventory.find(i => i.id === firstItem.itemId);
-                      const totalCost = group.reduce((acc, curr) => acc + curr.purchasePrice, 0);
-                      const totalQty = group.reduce((acc, curr) => acc + curr.quantity, 0);
-                      const uniqueSuppliers = Array.from(new Set(group.map(p => p.supplier)));
+                      const isNewBulkGroup = group.length === 1 && firstItem.items && firstItem.items.length > 0;
+                      const isBulkGroup = isLegacyBulkGroup || isNewBulkGroup;
+                      const isExpanded = expandedGroups.has(baseId);
+                      const itemDetails = isNewBulkGroup ? null : inventory.find(i => i.id === firstItem.itemId);
+                      const totalCost = isNewBulkGroup ? (firstItem.totalCost || 0) : group.reduce((acc, curr) => acc + (curr.purchasePrice || 0), 0);
+                      const totalQty = isNewBulkGroup ? firstItem.items!.reduce((acc, curr) => acc + curr.quantity, 0) : group.reduce((acc, curr) => acc + (curr.quantity || 0), 0);
+                      const uniqueSuppliers = isNewBulkGroup ? [firstItem.supplier] : Array.from(new Set(group.map(p => p.supplier)));
                       const displaySupplier = uniqueSuppliers.length > 1 ? 'Multiple Suppliers' : uniqueSuppliers[0];
                       
-                      const hasPending = group.some(p => p.paymentStatus === 'Pending');
-                      const allPending = group.every(p => p.paymentStatus === 'Pending');
+                      const hasPending = isNewBulkGroup ? firstItem.paymentStatus === 'Pending' : group.some(p => p.paymentStatus === 'Pending');
+                      const allPending = isNewBulkGroup ? firstItem.paymentStatus === 'Pending' : group.every(p => p.paymentStatus === 'Pending');
                       const statusLabel = allPending ? 'Pending' : hasPending ? 'Mixed' : 'Paid';
                       const statusColor = allPending || hasPending ? 'bg-amber-500' : 'bg-emerald-500';
 
@@ -2180,7 +2212,7 @@ const App: React.FC = () => {
                                  <div>
                                     <h3 className="text-sm font-bold text-white flex items-center">
                                        {isBulkGroup ? `Bulk Order` : (itemDetails?.name || 'Unknown Item')}
-                                       {isBulkGroup && <span className="ml-2 text-[9px] bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-400">x{group.length}</span>}
+                                       {isBulkGroup && <span className="ml-2 text-[9px] bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-400">x{isNewBulkGroup ? firstItem.items!.length : group.length}</span>}
                                     </h3>
                                     <div className="flex items-center text-xs text-neutral-500 mt-1">
                                        <Truck size={12} className="mr-1" /> {displaySupplier}
@@ -2188,19 +2220,19 @@ const App: React.FC = () => {
                                  </div>
                                  <div className="flex flex-col items-end gap-2">
                                      <button
-                                        onClick={(e) => !isBulkGroup ? cyclePurchaseStatus(e, firstItem.id, firstItem.paymentStatus) : undefined}
-                                        disabled={isBulkGroup}
+                                        onClick={(e) => (!isBulkGroup || isNewBulkGroup) ? cyclePurchaseStatus(e, firstItem.id, firstItem.paymentStatus) : undefined}
+                                        disabled={isLegacyBulkGroup}
                                         className={`text-[10px] font-bold uppercase px-2 py-1 rounded ${
                                             statusLabel === 'Paid' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-amber-500/10 text-amber-400'
-                                        } ${!isBulkGroup ? 'cursor-pointer hover:opacity-80 transition-opacity' : 'cursor-default'}`}
+                                        } ${(!isBulkGroup || isNewBulkGroup) ? 'cursor-pointer hover:opacity-80 transition-opacity' : 'cursor-default'}`}
                                      >
                                         {statusLabel}
                                      </button>
                                      {/* Single Item Delete Button */}
-                                     {!isBulkGroup && (
+                                     {(!isBulkGroup || isNewBulkGroup) && (
                                          <button 
-                                            onClick={(e) => initiateDeletePurchase(firstItem, e)}
-                                            className="p-1.5 bg-neutral-800 hover:bg-rose-500/10 text-neutral-500 hover:text-rose-400 rounded transition-colors"
+                                            onClick={(e) => { e.stopPropagation(); initiateDeletePurchase(firstItem, e); }}
+                                            className="p-1.5 bg-neutral-800 hover:bg-rose-500/10 text-neutral-500 hover:text-rose-400 rounded transition-colors z-10 relative"
                                          >
                                             <Trash2 size={14} />
                                          </button>
@@ -2230,7 +2262,21 @@ const App: React.FC = () => {
 
                               {isBulkGroup && isExpanded && (
                                   <div className="mt-3 space-y-2">
-                                      {group.map((p) => {
+                                      {isNewBulkGroup ? firstItem.items!.map((p, idx) => {
+                                         const subItem = inventory.find(i => i.id === p.itemId);
+                                         return (
+                                            <div key={idx} className="bg-neutral-900/50 p-3 rounded-lg text-xs relative group/item">
+                                               <div className="flex justify-between pr-6">
+                                                  <span className="font-bold text-neutral-300">{subItem?.name}</span>
+                                                  <span className="text-neutral-500">{p.quantity} qty</span>
+                                               </div>
+                                               <div className="flex justify-between mt-1 pr-6">
+                                                  <span className="text-[10px] text-neutral-600">{firstItem.supplier}</span>
+                                                  <span className="font-bold text-neutral-400">{formatCurrency(p.purchasePrice)}</span>
+                                               </div>
+                                            </div>
+                                         )
+                                      }) : group.map((p) => {
                                          const subItem = inventory.find(i => i.id === p.itemId);
                                          return (
                                             <div key={p.id} className="bg-neutral-900/50 p-3 rounded-lg text-xs relative group/item">
@@ -2240,11 +2286,11 @@ const App: React.FC = () => {
                                                </div>
                                                <div className="flex justify-between mt-1 pr-6">
                                                   <span className="text-[10px] text-neutral-600">{p.supplier}</span>
-                                                  <span className="font-bold text-neutral-400">{formatCurrency(p.purchasePrice)}</span>
+                                                  <span className="font-bold text-neutral-400">{formatCurrency(p.purchasePrice || 0)}</span>
                                                </div>
                                                 <div className="flex justify-end mt-2 pr-6">
                                                    <button
-                                                      onClick={(e) => cyclePurchaseStatus(e, p.id, p.paymentStatus)}
+                                                      onClick={(e) => { e.stopPropagation(); cyclePurchaseStatus(e, p.id, p.paymentStatus); }}
                                                       className={`text-[9px] font-bold uppercase px-2 py-0.5 rounded border transition-colors ${
                                                           p.paymentStatus === 'Paid' 
                                                           ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20 hover:bg-emerald-500/20' 
@@ -2255,8 +2301,8 @@ const App: React.FC = () => {
                                                     </button>
                                                 </div>
                                                <button 
-                                                    onClick={(e) => initiateDeletePurchase(p, e)}
-                                                    className="absolute top-2 right-2 p-1.5 text-neutral-600 hover:text-rose-400 hover:bg-rose-500/10 rounded transition-colors"
+                                                    onClick={(e) => { e.stopPropagation(); initiateDeletePurchase(p, e); }}
+                                                    className="absolute top-2 right-2 p-1.5 text-neutral-600 hover:text-rose-400 hover:bg-rose-500/10 rounded transition-colors z-10"
                                                >
                                                    <Trash2 size={12} />
                                                </button>
@@ -2287,18 +2333,20 @@ const App: React.FC = () => {
                       </thead>
                       <tbody className="divide-y divide-neutral-800/50">
                         {Array.from(groupedPurchases.entries()).map(([baseId, group]) => {
-                          const isBulkGroup = group.length > 1;
-                          const isExpanded = expandedGroups.has(baseId);
+                          const isLegacyBulkGroup = group.length > 1;
                           const firstItem = group[0];
-                          const itemDetails = inventory.find(i => i.id === firstItem.itemId);
-                          const totalCost = group.reduce((acc, curr) => acc + curr.purchasePrice, 0);
-                          const totalQty = group.reduce((acc, curr) => acc + curr.quantity, 0);
-                          const distinctItemsCount = group.length;
-                          const uniqueSuppliers = Array.from(new Set(group.map(p => p.supplier)));
+                          const isNewBulkGroup = group.length === 1 && firstItem.items && firstItem.items.length > 0;
+                          const isBulkGroup = isLegacyBulkGroup || isNewBulkGroup;
+                          const isExpanded = expandedGroups.has(baseId);
+                          const itemDetails = isNewBulkGroup ? null : inventory.find(i => i.id === firstItem.itemId);
+                          const totalCost = isNewBulkGroup ? (firstItem.totalCost || 0) : group.reduce((acc, curr) => acc + (curr.purchasePrice || 0), 0);
+                          const totalQty = isNewBulkGroup ? firstItem.items!.reduce((acc, curr) => acc + curr.quantity, 0) : group.reduce((acc, curr) => acc + (curr.quantity || 0), 0);
+                          const distinctItemsCount = isNewBulkGroup ? firstItem.items!.length : group.length;
+                          const uniqueSuppliers = isNewBulkGroup ? [firstItem.supplier] : Array.from(new Set(group.map(p => p.supplier)));
                           const isMultiSupplier = uniqueSuppliers.length > 1;
                           const displaySupplier = isMultiSupplier ? 'Multiple Suppliers' : uniqueSuppliers[0];
-                          const hasPending = group.some(p => p.paymentStatus === 'Pending');
-                          const allPending = group.every(p => p.paymentStatus === 'Pending');
+                          const hasPending = isNewBulkGroup ? firstItem.paymentStatus === 'Pending' : group.some(p => p.paymentStatus === 'Pending');
+                          const allPending = isNewBulkGroup ? firstItem.paymentStatus === 'Pending' : group.every(p => p.paymentStatus === 'Pending');
                           const statusLabel = allPending ? 'Pending' : hasPending ? 'Mixed Status' : 'Paid';
                           const statusColor = allPending || hasPending ? 'text-amber-500' : 'text-emerald-500';
 
@@ -2350,9 +2398,14 @@ const App: React.FC = () => {
                                   {firstItem.purchaseDate}
                                 </td>
                                 <td 
-                                    className={`px-8 py-6 whitespace-nowrap ${!isBulkGroup ? 'cursor-pointer hover:bg-white/5 transition-colors rounded' : ''}`}
-                                    onClick={(e) => !isBulkGroup && cyclePurchaseStatus(e, firstItem.id, firstItem.paymentStatus)}
-                                    title={!isBulkGroup ? "Click to toggle status" : ""}
+                                    className={`px-8 py-6 whitespace-nowrap ${(!isBulkGroup || isNewBulkGroup) ? 'cursor-pointer hover:bg-white/5 transition-colors rounded' : ''}`}
+                                    onClick={(e) => {
+                                        if (!isBulkGroup || isNewBulkGroup) {
+                                            e.stopPropagation();
+                                            cyclePurchaseStatus(e, firstItem.id, firstItem.paymentStatus);
+                                        }
+                                    }}
+                                    title={(!isBulkGroup || isNewBulkGroup) ? "Click to toggle status" : ""}
                                 >
                                   <div className={`flex items-center space-x-2 ${statusColor}`}>
                                     {statusLabel === 'Paid' ? <CheckCircle2 size={14} /> : <Clock size={14} />}
@@ -2365,9 +2418,9 @@ const App: React.FC = () => {
                                   </span>
                                 </td>
                                 <td className="px-8 py-6 text-center whitespace-nowrap">
-                                    {!isBulkGroup && (
+                                    {(!isBulkGroup || isNewBulkGroup) && (
                                         <button 
-                                            onClick={(e) => initiateDeletePurchase(firstItem, e)}
+                                            onClick={(e) => { e.stopPropagation(); initiateDeletePurchase(firstItem, e); }}
                                             className="p-2 text-neutral-500 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-all"
                                             title="Delete Record"
                                         >
@@ -2376,7 +2429,37 @@ const App: React.FC = () => {
                                     )}
                                 </td>
                               </tr>
-                              {isBulkGroup && isExpanded && group.map((purchase, idx) => {
+                              {isBulkGroup && isExpanded && (isNewBulkGroup ? firstItem.items!.map((p, idx) => {
+                                const subItem = inventory.find(i => i.id === p.itemId);
+                                return (
+                                  <tr key={idx} className="bg-neutral-900/30 hover:bg-neutral-900/50 transition-colors">
+                                    <td className="px-8 py-4 relative">
+                                       <div className="absolute left-12 top-0 bottom-1/2 w-4 border-l border-b border-neutral-700/50 rounded-bl-xl" />
+                                    </td>
+                                    <td className="px-8 py-4">
+                                      <p className="font-medium text-neutral-300 text-sm">{subItem?.name}</p>
+                                      <p className="text-[10px] text-neutral-600">{subItem?.category}</p>
+                                    </td>
+                                     <td className="px-8 py-4">
+                                       <span className="text-xs text-neutral-400">{firstItem.supplier}</span>
+                                     </td>
+                                    <td className="px-8 py-4">
+                                      <span className="text-sm font-bold text-neutral-400">{p.quantity} units</span>
+                                    </td>
+                                    <td className="px-8 py-4 text-xs text-neutral-600">
+                                    </td>
+                                    <td className="px-8 py-4">
+                                    </td>
+                                    <td className="px-8 py-4 text-right">
+                                      <span className="text-sm font-bold text-neutral-400">
+                                        {formatCurrency(p.purchasePrice)}
+                                      </span>
+                                    </td>
+                                    <td className="px-8 py-4 text-center">
+                                    </td>
+                                  </tr>
+                                );
+                              }) : group.map((purchase, idx) => {
                                 const subItem = inventory.find(i => i.id === purchase.itemId);
                                 return (
                                   <tr key={purchase.id} className="bg-neutral-900/30 hover:bg-neutral-900/50 transition-colors">
@@ -2397,7 +2480,7 @@ const App: React.FC = () => {
                                     </td>
                                     <td className="px-8 py-4">
                                       <button 
-                                        onClick={(e) => cyclePurchaseStatus(e, purchase.id, purchase.paymentStatus)}
+                                        onClick={(e) => { e.stopPropagation(); cyclePurchaseStatus(e, purchase.id, purchase.paymentStatus); }}
                                         className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded border transition-colors ${
                                         purchase.paymentStatus === 'Paid' 
                                           ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20 hover:bg-emerald-500/20' 
@@ -2408,21 +2491,21 @@ const App: React.FC = () => {
                                     </td>
                                     <td className="px-8 py-4 text-right">
                                       <span className="text-sm font-bold text-neutral-400">
-                                        {formatCurrency(purchase.purchasePrice)}
+                                        {formatCurrency(purchase.purchasePrice || 0)}
                                       </span>
                                     </td>
                                     <td className="px-8 py-4 text-center">
                                          <button 
-                                            onClick={(e) => initiateDeletePurchase(purchase, e)}
+                                            onClick={(e) => { e.stopPropagation(); initiateDeletePurchase(purchase, e); }}
                                             className="p-1.5 text-neutral-600 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-all"
                                             title="Delete Record"
                                         >
-                                            <Trash2 size={14} />
+                                            <Trash2 size={16} />
                                         </button>
                                     </td>
                                   </tr>
                                 );
-                              })}
+                              }))}
                             </React.Fragment>
                           );
                         })}
@@ -3110,7 +3193,7 @@ const App: React.FC = () => {
 
       {/* Mobile Bottom Navigation */}
       <div className="md:hidden fixed bottom-0 left-0 right-0 bg-[#0a0a0a]/95 backdrop-blur-lg border-t border-neutral-800 z-50">
-        <div className="flex items-center overflow-x-auto no-scrollbar px-2 py-2 gap-1">
+        <div className="flex items-center justify-between w-full px-1 py-2">
            {[
              { id: 'dashboard', icon: LayoutDashboard, label: 'Overview' },
              { id: 'inventory', icon: Package, label: 'Fleet' },
@@ -3123,14 +3206,14 @@ const App: React.FC = () => {
               <button
                 key={item.id}
                 onClick={() => setView(item.id as ViewType)}
-                className={`flex flex-col items-center justify-center min-w-[64px] flex-1 p-2 rounded-xl transition-all ${
+                className={`flex flex-col items-center justify-center flex-1 min-w-0 py-1.5 px-0.5 rounded-xl transition-all ${
                   view === item.id 
                     ? 'text-blue-500 bg-blue-500/10' 
                     : 'text-neutral-500 hover:text-neutral-300'
                 }`}
               >
-                <item.icon size={20} className="mb-1" />
-                <span className="text-[10px] font-medium tracking-wide whitespace-nowrap">{item.label}</span>
+                <item.icon size={18} className="mb-1" />
+                <span className="text-[9px] sm:text-[10px] font-medium tracking-tight leading-tight">{item.label}</span>
               </button>
            ))}
         </div>
@@ -3142,7 +3225,7 @@ const App: React.FC = () => {
       {isDeletePurchaseModalOpen && purchaseToDelete && (
         <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setIsDeletePurchaseModalOpen(false)} />
-          <div className="relative w-[95%] max-w-sm bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col items-center text-center">
+          <div className="relative w-full max-w-sm bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col items-center text-center">
             <div className="w-16 h-16 bg-rose-500/10 rounded-full flex items-center justify-center mb-6">
               <AlertCircle size={32} className="text-rose-500" />
             </div>
@@ -3180,7 +3263,7 @@ const App: React.FC = () => {
       {isMaintenanceModalOpen && maintenanceItem && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setIsMaintenanceModalOpen(false)} />
-          <div className="relative w-[95%] max-w-sm bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col items-center">
+          <div className="relative w-full max-w-sm bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col items-center">
              <div className={`w-16 h-16 rounded-full flex items-center justify-center mb-6 ${maintenanceAction === 'repair' ? 'bg-blue-500/10 text-blue-500' : 'bg-rose-500/10 text-rose-500'}`}>
                 {maintenanceAction === 'repair' ? <Wrench size={32} /> : <Trash2 size={32} />}
              </div>
@@ -3238,7 +3321,7 @@ const App: React.FC = () => {
       {isDeleteModalOpen && (
         <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setIsDeleteModalOpen(false)} />
-          <div className="relative w-[95%] max-w-sm bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col items-center text-center">
+          <div className="relative w-full max-w-sm bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col items-center text-center">
             <div className="w-16 h-16 bg-rose-500/10 rounded-full flex items-center justify-center mb-6">
               <AlertCircle size={32} className="text-rose-500" />
             </div>
@@ -3268,7 +3351,7 @@ const App: React.FC = () => {
       {isDeleteRentalModalOpen && (
         <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setIsDeleteRentalModalOpen(false)} />
-          <div className="relative w-[95%] max-w-sm bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col items-center text-center">
+          <div className="relative w-full max-w-sm bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col items-center text-center">
             <div className="w-16 h-16 bg-rose-500/10 rounded-full flex items-center justify-center mb-6">
               <AlertCircle size={32} className="text-rose-500" />
             </div>
@@ -3299,7 +3382,7 @@ const App: React.FC = () => {
       {isDeleteInventoryModalOpen && (
         <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setIsDeleteInventoryModalOpen(false)} />
-          <div className="relative w-[95%] max-w-sm bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col items-center text-center">
+          <div className="relative w-full max-w-sm bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col items-center text-center">
             <div className="w-16 h-16 bg-rose-500/10 rounded-full flex items-center justify-center mb-6">
               <AlertCircle size={32} className="text-rose-500" />
             </div>
@@ -3329,7 +3412,7 @@ const App: React.FC = () => {
       {selectedItemForHistory && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setSelectedItemForHistory(null)} />
-          <div className="relative w-[95%] max-w-4xl bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+          <div className="relative w-full max-w-4xl bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
             <div className="flex items-center justify-between mb-8">
                 <div>
                   <h2 className="text-xl font-bold flex items-center">
@@ -3354,29 +3437,54 @@ const App: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-neutral-800/50">
-                  {purchases.filter(p => p.itemId === selectedItemForHistory.id).length > 0 ? (
-                    purchases.filter(p => p.itemId === selectedItemForHistory.id).map(p => (
-                      <tr key={p.id} className="hover:bg-neutral-800/20">
-                        <td className="px-6 py-4 text-sm text-neutral-300 font-bold">{p.supplier}</td>
-                        <td className="px-6 py-4 text-sm text-white">{p.quantity} units</td>
-                        <td className="px-6 py-4">
-                           <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded border ${
-                              p.paymentStatus === 'Paid' 
-                                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' 
-                                : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
-                            }`}>
-                              {p.paymentStatus}
-                            </span>
-                        </td>
-                        <td className="px-6 py-4 text-sm font-black text-emerald-400 text-right">{formatCurrency(p.purchasePrice)}</td>
-                        <td className="px-6 py-4 text-xs text-neutral-500 text-right font-mono uppercase">{p.purchaseDate}</td>
+                  {(() => {
+                    const itemPurchases = purchases.flatMap(p => {
+                      if (p.items && p.items.length > 0) {
+                        return p.items.filter(pi => pi.itemId === selectedItemForHistory.id).map(pi => ({
+                          id: `${p.id}-${pi.itemId}`,
+                          supplier: p.supplier,
+                          quantity: pi.quantity,
+                          paymentStatus: p.paymentStatus,
+                          purchasePrice: pi.purchasePrice,
+                          purchaseDate: p.purchaseDate
+                        }));
+                      } else if (p.itemId === selectedItemForHistory.id) {
+                        return [{
+                          id: p.id,
+                          supplier: p.supplier,
+                          quantity: p.quantity || 0,
+                          paymentStatus: p.paymentStatus,
+                          purchasePrice: p.purchasePrice || 0,
+                          purchaseDate: p.purchaseDate
+                        }];
+                      }
+                      return [];
+                    });
+
+                    return itemPurchases.length > 0 ? (
+                      itemPurchases.map(p => (
+                        <tr key={p.id} className="hover:bg-neutral-800/20">
+                          <td className="px-6 py-4 text-sm text-neutral-300 font-bold">{p.supplier}</td>
+                          <td className="px-6 py-4 text-sm text-white">{p.quantity} units</td>
+                          <td className="px-6 py-4">
+                             <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded border ${
+                                p.paymentStatus === 'Paid' 
+                                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' 
+                                  : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                              }`}>
+                                {p.paymentStatus}
+                              </span>
+                          </td>
+                          <td className="px-6 py-4 text-sm font-black text-emerald-400 text-right">{formatCurrency(p.purchasePrice)}</td>
+                          <td className="px-6 py-4 text-xs text-neutral-500 text-right font-mono uppercase">{p.purchaseDate}</td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan={5} className="px-6 py-12 text-center text-neutral-600 text-sm italic">No purchase records found for this item.</td>
                       </tr>
-                    ))
-                  ) : (
-                    <tr>
-                      <td colSpan={5} className="px-6 py-12 text-center text-neutral-600 text-sm italic">No purchase records found for this item.</td>
-                    </tr>
-                  )}
+                    );
+                  })()}
                 </tbody>
               </table>
             </div>
@@ -3400,7 +3508,7 @@ const App: React.FC = () => {
       {isCustomerModalOpen && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setIsCustomerModalOpen(false)} />
-          <div className="relative w-[95%] max-w-md bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden">
+          <div className="relative w-full max-w-md bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden">
             <div className="flex items-center justify-between mb-8">
               <div>
                 <h2 className="text-xl font-bold flex items-center">
@@ -3497,7 +3605,7 @@ const App: React.FC = () => {
       {isNewItemModalOpen && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setIsNewItemModalOpen(false)} />
-          <div className="relative w-[95%] max-w-md bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden">
+          <div className="relative w-full max-w-md bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden">
             <div className="flex items-center justify-between mb-8">
               <div>
                 <h2 className="text-xl font-bold flex items-center">
@@ -3599,9 +3707,10 @@ const App: React.FC = () => {
       {isPurchaseModalOpen && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setIsPurchaseModalOpen(false)} />
-          <div className={`relative w-[95%] ${isBulkMode ? 'max-w-5xl' : 'max-w-md'} bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden transition-all duration-300`}>
-            {/* ... existing purchase modal content ... */}
-            <div className="flex flex-col md:flex-row md:items-center justify-between mb-8 gap-4 md:gap-0">
+          <div className={`relative w-[95%] ${isBulkMode ? 'max-w-5xl' : 'max-w-md'} mx-auto flex flex-col max-h-[90vh] bg-[#0a0a0a] border border-neutral-800 rounded-3xl shadow-2xl overflow-hidden transition-all duration-300`}>
+            
+            {/* Header (Fixed) */}
+            <div className="flex flex-col md:flex-row md:items-center justify-between p-6 md:p-8 pb-4 md:pb-6 border-b border-neutral-800/50 shrink-0 gap-4 md:gap-0">
                 <div>
                   <h2 className="text-xl font-bold flex items-center">
                       <Truck size={20} className="mr-2 text-emerald-500" /> {isBulkMode ? 'Bulk Fleet Procurement' : 'New Resupply Order'}
@@ -3612,6 +3721,7 @@ const App: React.FC = () => {
                   <div className="flex items-center space-x-2 bg-neutral-900 px-3 py-1.5 rounded-xl border border-neutral-800">
                     <span className={`text-[10px] font-black uppercase tracking-widest ${!isBulkMode ? 'text-blue-400' : 'text-neutral-600'}`}>Single</span>
                     <button 
+                      type="button"
                       onClick={() => setIsBulkMode(!isBulkMode)}
                       className="relative w-10 h-5 bg-neutral-700 rounded-full transition-colors focus:outline-none"
                     >
@@ -3619,251 +3729,278 @@ const App: React.FC = () => {
                     </button>
                     <span className={`text-[10px] font-black uppercase tracking-widest ${isBulkMode ? 'text-emerald-400' : 'text-neutral-600'}`}>Bulk</span>
                   </div>
-                  <button onClick={() => setIsPurchaseModalOpen(false)} className="text-neutral-500 hover:text-white transition-colors">
+                  <button type="button" onClick={() => setIsPurchaseModalOpen(false)} className="text-neutral-500 hover:text-white transition-colors">
                       <X size={20} />
                   </button>
                 </div>
             </div>
             
-            <form onSubmit={handleResupply} className="space-y-6">
-                {!isBulkMode ? (
-                  <div className="space-y-6">
-                    <div>
-                        <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-2">Select Equipment</label>
-                        <div className="relative">
-                            <select 
-                                required
-                                className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-emerald-500 outline-none transition-all text-white appearance-none"
-                                value={singlePurchase.itemId}
-                                onChange={(e) => setSinglePurchase({...singlePurchase, itemId: e.target.value})}
-                            >
-                                <option value="">Select Item...</option>
-                                {inventory.map(item => (
-                                    <option key={item.id} value={item.id}>{item.name} ({item.category})</option>
-                                ))}
-                            </select>
-                            <ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 text-neutral-500 pointer-events-none" size={16} />
-                        </div>
-                    </div>
+            {/* Scrollable Form Content */}
+            <div className="flex-1 overflow-y-auto p-6 md:p-8 custom-scrollbar">
+              <form id="resupply-form" onSubmit={handleResupply} className="space-y-6">
+                  {!isBulkMode ? (
+                    <div className="space-y-6">
+                      <div>
+                          <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-2">Procurement Date</label>
+                          <input 
+                              required
+                              type="date"
+                              className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-emerald-500 outline-none transition-all text-white appearance-none"
+                              value={procurementDate}
+                              onChange={(e) => setProcurementDate(e.target.value)}
+                          />
+                      </div>
+                      <div>
+                          <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-2">Select Equipment</label>
+                          <div className="relative">
+                              <select 
+                                  required
+                                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-emerald-500 outline-none transition-all text-white appearance-none"
+                                  value={singlePurchase.itemId}
+                                  onChange={(e) => setSinglePurchase({...singlePurchase, itemId: e.target.value})}
+                              >
+                                  <option value="">Select Item...</option>
+                                  {inventory.map(item => (
+                                      <option key={item.id} value={item.id}>{item.name} ({item.category})</option>
+                                  ))}
+                              </select>
+                              <ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 text-neutral-500 pointer-events-none" size={16} />
+                          </div>
+                      </div>
 
-                    <div>
-                        <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-2">Supplier Name</label>
-                        <input 
-                            required
-                            type="text"
-                            placeholder="e.g. Scaffold Hub Indo"
-                            className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-emerald-500 outline-none transition-all text-white"
-                            value={singlePurchase.supplier}
-                            onChange={(e) => setSinglePurchase({...singlePurchase, supplier: e.target.value})}
-                        />
-                    </div>
+                      <div>
+                          <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-2">Supplier Name</label>
+                          <input 
+                              required
+                              type="text"
+                              placeholder="e.g. Scaffold Hub Indo"
+                              className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-emerald-500 outline-none transition-all text-white"
+                              value={singlePurchase.supplier}
+                              onChange={(e) => setSinglePurchase({...singlePurchase, supplier: e.target.value})}
+                          />
+                      </div>
 
-                    <div className="grid grid-cols-2 gap-4">
-                        <div>
-                            <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-2">Quantity</label>
-                            <input 
-                                required
-                                type="number"
-                                min="1"
-                                className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-emerald-500 outline-none transition-all text-white"
-                                value={singlePurchase.quantity}
-                                onChange={(e) => setSinglePurchase({...singlePurchase, quantity: parseInt(e.target.value)})}
-                            />
-                        </div>
-                        <div>
-                            <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-2">Total Price (IDR)</label>
-                            <input 
-                                required
-                                type="number"
-                                min="0"
-                                className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-emerald-500 outline-none transition-all text-white"
-                                value={singlePurchase.purchasePrice}
-                                onChange={(e) => setSinglePurchase({...singlePurchase, purchasePrice: parseInt(e.target.value)})}
-                            />
-                        </div>
-                    </div>
-
-                    <div>
-                      <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-3">Payment Status</label>
                       <div className="grid grid-cols-2 gap-4">
-                        <button
-                          type="button"
-                          onClick={() => setSinglePurchase({...singlePurchase, paymentStatus: 'Paid'})}
-                          className={`flex items-center justify-center p-3 rounded-xl border transition-all ${
-                            singlePurchase.paymentStatus === 'Paid' 
-                            ? 'bg-emerald-500/10 border-emerald-500 text-emerald-400' 
-                            : 'bg-neutral-900 border-neutral-800 text-neutral-500 hover:border-neutral-700'
-                          }`}
-                        >
-                          <CheckCircle2 size={16} className="mr-2" />
-                          <span className="text-xs font-bold uppercase tracking-wide">Paid</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setSinglePurchase({...singlePurchase, paymentStatus: 'Pending'})}
-                          className={`flex items-center justify-center p-3 rounded-xl border transition-all ${
-                            singlePurchase.paymentStatus === 'Pending' 
-                            ? 'bg-amber-500/10 border-amber-500 text-amber-400' 
-                            : 'bg-neutral-900 border-neutral-800 text-neutral-500 hover:border-neutral-700'
-                          }`}
-                        >
-                          <Clock size={16} className="mr-2" />
-                          <span className="text-xs font-bold uppercase tracking-wide">Pending</span>
-                        </button>
+                          <div>
+                              <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-2">Quantity</label>
+                              <input 
+                                  required
+                                  type="number"
+                                  min="1"
+                                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-emerald-500 outline-none transition-all text-white"
+                                  value={singlePurchase.quantity}
+                                  onChange={(e) => setSinglePurchase({...singlePurchase, quantity: parseInt(e.target.value)})}
+                              />
+                          </div>
+                          <div>
+                              <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-2">Total Price (IDR)</label>
+                              <input 
+                                  required
+                                  type="number"
+                                  min="0"
+                                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-emerald-500 outline-none transition-all text-white"
+                                  value={singlePurchase.purchasePrice}
+                                  onChange={(e) => setSinglePurchase({...singlePurchase, purchasePrice: parseInt(e.target.value)})}
+                              />
+                          </div>
+                      </div>
+
+                      <div>
+                        <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-3">Payment Status</label>
+                        <div className="grid grid-cols-2 gap-4">
+                          <button
+                            type="button"
+                            onClick={() => setSinglePurchase({...singlePurchase, paymentStatus: 'Paid'})}
+                            className={`flex items-center justify-center p-3 rounded-xl border transition-all ${
+                              singlePurchase.paymentStatus === 'Paid' 
+                              ? 'bg-emerald-500/10 border-emerald-500 text-emerald-400' 
+                              : 'bg-neutral-900 border-neutral-800 text-neutral-500 hover:border-neutral-700'
+                            }`}
+                          >
+                            <CheckCircle2 size={16} className="mr-2" />
+                            <span className="text-xs font-bold uppercase tracking-wide">Paid</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setSinglePurchase({...singlePurchase, paymentStatus: 'Pending'})}
+                            className={`flex items-center justify-center p-3 rounded-xl border transition-all ${
+                              singlePurchase.paymentStatus === 'Pending' 
+                              ? 'bg-amber-500/10 border-amber-500 text-amber-400' 
+                              : 'bg-neutral-900 border-neutral-800 text-neutral-500 hover:border-neutral-700'
+                            }`}
+                          >
+                            <Clock size={16} className="mr-2" />
+                            <span className="text-xs font-bold uppercase tracking-wide">Pending</span>
+                          </button>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ) : (
-                  <div className="space-y-4 max-h-[60vh] overflow-y-auto px-1 md:px-4 custom-scrollbar relative -mx-1 md:mx-0">
-                    {/* Desktop Headers - Hidden on Mobile */}
-                    <div className="hidden md:grid grid-cols-12 gap-3 px-3 py-2 sticky top-0 bg-[#0a0a0a] z-10 border-b border-neutral-800 mb-2">
-                        <div className="col-span-3 text-[9px] font-black text-neutral-500 uppercase tracking-widest">Equipment</div>
-                        <div className="col-span-3 text-[9px] font-black text-neutral-500 uppercase tracking-widest">Supplier</div>
-                        <div className="col-span-2 text-[9px] font-black text-neutral-500 uppercase tracking-widest">Status</div>
-                        <div className="col-span-1 text-[9px] font-black text-neutral-500 uppercase tracking-widest">Qty</div>
-                        <div className="col-span-2 text-[9px] font-black text-neutral-500 uppercase tracking-widest">Total (IDR)</div>
-                        <div className="col-span-1"></div>
-                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      <div className="mb-4">
+                          <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-2">Procurement Date</label>
+                          <input 
+                              required
+                              type="date"
+                              className="w-full md:w-1/3 bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-emerald-500 outline-none transition-all text-white appearance-none"
+                              value={procurementDate}
+                              onChange={(e) => setProcurementDate(e.target.value)}
+                          />
+                      </div>
 
-                    <div className="space-y-4 md:space-y-2 px-1 md:px-0">
-                      {bulkRows.map((row, index) => (
-                        <div key={row.id} className="relative bg-neutral-900/40 hover:bg-neutral-800/40 p-4 md:p-2 rounded-xl border border-neutral-800/50 transition-colors group">
-                           {/* Responsive Grid */}
-                           <div className="grid grid-cols-1 md:grid-cols-12 gap-4 md:gap-3 md:items-center">
-                              
-                              {/* Item ID */}
-                              <div className="col-span-1 md:col-span-3">
-                                <label className="md:hidden block text-[9px] font-black text-neutral-500 uppercase tracking-widest mb-1.5">Equipment</label>
-                                <div className="flex flex-row items-end gap-3">
-                                  <div className="relative flex-1">
-                                    <select 
-                                      required
-                                      className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2.5 md:py-2 text-sm md:text-xs focus:ring-1 focus:ring-emerald-500 outline-none text-white appearance-none"
-                                      value={row.itemId}
-                                      onChange={(e) => updateBulkRow(row.id, 'itemId', e.target.value)}
+                      {/* Desktop Headers - Hidden on Mobile */}
+                      <div className="hidden md:grid grid-cols-12 gap-3 px-3 py-2 sticky top-0 bg-[#0a0a0a] z-10 border-b border-neutral-800 mb-2">
+                          <div className="col-span-3 text-[9px] font-black text-neutral-500 uppercase tracking-widest">Equipment</div>
+                          <div className="col-span-3 text-[9px] font-black text-neutral-500 uppercase tracking-widest">Supplier</div>
+                          <div className="col-span-2 text-[9px] font-black text-neutral-500 uppercase tracking-widest">Status</div>
+                          <div className="col-span-1 text-[9px] font-black text-neutral-500 uppercase tracking-widest">Qty</div>
+                          <div className="col-span-2 text-[9px] font-black text-neutral-500 uppercase tracking-widest">Total (IDR)</div>
+                          <div className="col-span-1"></div>
+                      </div>
+
+                      <div className="space-y-4 md:space-y-2">
+                        {bulkRows.map((row, index) => (
+                          <div key={row.id} className="relative bg-neutral-900/40 hover:bg-neutral-800/40 p-4 md:p-2 rounded-xl border border-neutral-800/50 transition-colors group">
+                             {/* Responsive Grid */}
+                             <div className="grid grid-cols-1 md:grid-cols-12 gap-4 md:gap-3 md:items-center">
+                                
+                                {/* Item ID */}
+                                <div className="col-span-1 md:col-span-3">
+                                  <label className="md:hidden block text-[9px] font-black text-neutral-500 uppercase tracking-widest mb-1.5">Equipment</label>
+                                  <div className="flex flex-row items-end gap-3">
+                                    <div className="relative flex-1">
+                                      <select 
+                                        required
+                                        className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2.5 md:py-2 text-sm md:text-xs focus:ring-1 focus:ring-emerald-500 outline-none text-white appearance-none"
+                                        value={row.itemId}
+                                        onChange={(e) => updateBulkRow(row.id, 'itemId', e.target.value)}
+                                      >
+                                        <option value="">Select Item...</option>
+                                        {inventory.map(item => (
+                                            <option key={item.id} value={item.id}>{item.name}</option>
+                                        ))}
+                                      </select>
+                                      <ChevronDown className="md:hidden absolute right-3 top-1/2 -translate-y-1/2 text-neutral-500 pointer-events-none" size={14} />
+                                    </div>
+                                    
+                                    {/* Mobile Delete Button */}
+                                    <button 
+                                        type="button"
+                                        onClick={() => removeBulkRow(row.id)}
+                                        className="md:hidden flex-shrink-0 h-10 w-10 flex items-center justify-center text-neutral-500 hover:text-rose-500 bg-neutral-800/50 rounded-lg"
                                     >
-                                      <option value="">Select Item...</option>
-                                      {inventory.map(item => (
-                                          <option key={item.id} value={item.id}>{item.name}</option>
-                                      ))}
-                                    </select>
-                                    <ChevronDown className="md:hidden absolute right-3 top-1/2 -translate-y-1/2 text-neutral-500 pointer-events-none" size={14} />
+                                        <Trash2 size={16} />
+                                    </button>
                                   </div>
-                                  
-                                  {/* Mobile Delete Button */}
-                                  <button 
+                                </div>
+
+                                {/* Supplier */}
+                                <div className="col-span-1 md:col-span-3">
+                                  <label className="md:hidden block text-[9px] font-black text-neutral-500 uppercase tracking-widest mb-1.5">Supplier</label>
+                                  <input 
+                                    required
+                                    type="text"
+                                    placeholder="e.g. Supplier Name"
+                                    className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2.5 md:py-2 text-sm md:text-xs focus:ring-1 focus:ring-emerald-500 outline-none text-white placeholder:text-neutral-600"
+                                    value={row.supplier}
+                                    onChange={(e) => updateBulkRow(row.id, 'supplier', e.target.value)}
+                                  />
+                                </div>
+
+                                {/* Inner Grid for Status, Qty, Price on Mobile */}
+                                <div className="col-span-1 md:col-span-5 grid grid-cols-2 md:grid-cols-5 gap-4 md:gap-3">
+                                    {/* Status - Desktop: col-span-2 */}
+                                    <div className="col-span-2 md:col-span-2">
+                                       <label className="md:hidden block text-[9px] font-black text-neutral-500 uppercase tracking-widest mb-1.5">Status</label>
+                                       <div className="relative">
+                                          <select
+                                            className={`w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2.5 md:py-2 text-sm md:text-xs focus:ring-1 focus:ring-emerald-500 outline-none appearance-none font-bold ${
+                                              row.paymentStatus === 'Paid' ? 'text-emerald-400' : 'text-amber-400'
+                                            }`}
+                                            value={row.paymentStatus}
+                                            onChange={(e) => updateBulkRow(row.id, 'paymentStatus', e.target.value)}
+                                          >
+                                            <option value="Paid">Paid</option>
+                                            <option value="Pending">Pending</option>
+                                          </select>
+                                          <ChevronDown className="md:hidden absolute right-3 top-1/2 -translate-y-1/2 text-neutral-500 pointer-events-none" size={14} />
+                                       </div>
+                                    </div>
+                                    
+                                    {/* Qty - Desktop: col-span-1 */}
+                                    <div className="col-span-1 md:col-span-1">
+                                        <label className="md:hidden block text-[9px] font-black text-neutral-500 uppercase tracking-widest mb-1.5">Qty</label>
+                                        <input 
+                                          required
+                                          type="number"
+                                          min="1"
+                                          className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2.5 md:py-2 text-sm md:text-xs focus:ring-1 focus:ring-emerald-500 outline-none text-white font-bold"
+                                          value={row.quantity}
+                                          onChange={(e) => updateBulkRow(row.id, 'quantity', parseInt(e.target.value))}
+                                        />
+                                    </div>
+
+                                    {/* Price - Desktop: col-span-2 */}
+                                    <div className="col-span-1 md:col-span-2">
+                                       <label className="md:hidden block text-[9px] font-black text-neutral-500 uppercase tracking-widest mb-1.5">Price</label>
+                                       <input 
+                                          required
+                                          type="number"
+                                          min="0"
+                                          className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2.5 md:py-2 text-sm md:text-xs focus:ring-1 focus:ring-emerald-500 outline-none text-white"
+                                          value={row.purchasePrice}
+                                          onChange={(e) => updateBulkRow(row.id, 'purchasePrice', parseInt(e.target.value))}
+                                       />
+                                    </div>
+                                </div>
+                                
+                                {/* Desktop Delete */}
+                                <div className="hidden md:flex col-span-1 justify-end">
+                                   <button 
                                       type="button"
                                       onClick={() => removeBulkRow(row.id)}
-                                      className="md:hidden flex-shrink-0 h-10 w-10 flex items-center justify-center text-neutral-500 hover:text-rose-500 bg-neutral-800/50 rounded-lg"
-                                  >
+                                      className="h-10 w-10 flex items-center justify-center text-neutral-600 hover:text-rose-500 hover:bg-rose-500/10 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                                      title="Remove item"
+                                   >
                                       <Trash2 size={16} />
-                                  </button>
+                                   </button>
                                 </div>
-                              </div>
-
-                              {/* Supplier */}
-                              <div className="col-span-1 md:col-span-3">
-                                <label className="md:hidden block text-[9px] font-black text-neutral-500 uppercase tracking-widest mb-1.5">Supplier</label>
-                                <input 
-                                  required
-                                  type="text"
-                                  placeholder="e.g. Supplier Name"
-                                  className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2.5 md:py-2 text-sm md:text-xs focus:ring-1 focus:ring-emerald-500 outline-none text-white placeholder:text-neutral-600"
-                                  value={row.supplier}
-                                  onChange={(e) => updateBulkRow(row.id, 'supplier', e.target.value)}
-                                />
-                              </div>
-
-                              {/* Inner Grid for Status, Qty, Price on Mobile */}
-                              <div className="col-span-1 md:col-span-5 grid grid-cols-2 md:grid-cols-5 gap-4 md:gap-3">
-                                  {/* Status - Desktop: col-span-2 */}
-                                  <div className="col-span-2 md:col-span-2">
-                                     <label className="md:hidden block text-[9px] font-black text-neutral-500 uppercase tracking-widest mb-1.5">Status</label>
-                                     <div className="relative">
-                                        <select
-                                          className={`w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2.5 md:py-2 text-sm md:text-xs focus:ring-1 focus:ring-emerald-500 outline-none appearance-none font-bold ${
-                                            row.paymentStatus === 'Paid' ? 'text-emerald-400' : 'text-amber-400'
-                                          }`}
-                                          value={row.paymentStatus}
-                                          onChange={(e) => updateBulkRow(row.id, 'paymentStatus', e.target.value)}
-                                        >
-                                          <option value="Paid">Paid</option>
-                                          <option value="Pending">Pending</option>
-                                        </select>
-                                        <ChevronDown className="md:hidden absolute right-3 top-1/2 -translate-y-1/2 text-neutral-500 pointer-events-none" size={14} />
-                                     </div>
-                                  </div>
-                                  
-                                  {/* Qty - Desktop: col-span-1 */}
-                                  <div className="col-span-1 md:col-span-1">
-                                      <label className="md:hidden block text-[9px] font-black text-neutral-500 uppercase tracking-widest mb-1.5">Qty</label>
-                                      <input 
-                                        required
-                                        type="number"
-                                        min="1"
-                                        className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2.5 md:py-2 text-sm md:text-xs focus:ring-1 focus:ring-emerald-500 outline-none text-white font-bold"
-                                        value={row.quantity}
-                                        onChange={(e) => updateBulkRow(row.id, 'quantity', parseInt(e.target.value))}
-                                      />
-                                  </div>
-
-                                  {/* Price - Desktop: col-span-2 */}
-                                  <div className="col-span-1 md:col-span-2">
-                                     <label className="md:hidden block text-[9px] font-black text-neutral-500 uppercase tracking-widest mb-1.5">Price</label>
-                                     <input 
-                                        required
-                                        type="number"
-                                        min="0"
-                                        className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2.5 md:py-2 text-sm md:text-xs focus:ring-1 focus:ring-emerald-500 outline-none text-white"
-                                        value={row.purchasePrice}
-                                        onChange={(e) => updateBulkRow(row.id, 'purchasePrice', parseInt(e.target.value))}
-                                     />
-                                  </div>
-                              </div>
-                              
-                              {/* Desktop Delete */}
-                              <div className="hidden md:flex col-span-1 justify-end">
-                                 <button 
-                                    type="button"
-                                    onClick={() => removeBulkRow(row.id)}
-                                    className="h-10 w-10 flex items-center justify-center text-neutral-600 hover:text-rose-500 hover:bg-rose-500/10 rounded-lg transition-all opacity-0 group-hover:opacity-100"
-                                    title="Remove item"
-                                 >
-                                    <Trash2 size={16} />
-                                 </button>
-                              </div>
-                           </div>
-                        </div>
-                      ))}
+                             </div>
+                          </div>
+                        ))}
+                      </div>
+                      
+                      <button 
+                        type="button"
+                        onClick={addBulkRow}
+                        className="w-full py-4 md:py-2.5 border border-dashed border-neutral-800 rounded-xl flex items-center justify-center text-neutral-500 hover:text-emerald-500 hover:border-emerald-500/30 hover:bg-emerald-500/5 transition-all text-xs font-bold uppercase tracking-widest mt-4"
+                      >
+                        <Plus size={14} className="mr-2" /> Add another item
+                      </button>
                     </div>
-                    
-                    <button 
-                      type="button"
-                      onClick={addBulkRow}
-                      className="w-full py-4 md:py-2.5 border border-dashed border-neutral-800 rounded-xl flex items-center justify-center text-neutral-500 hover:text-emerald-500 hover:border-emerald-500/30 hover:bg-emerald-500/5 transition-all text-xs font-bold uppercase tracking-widest mt-4"
-                    >
-                      <Plus size={14} className="mr-2" /> Add another item
-                    </button>
+                  )}
+              </form>
+            </div>
+
+            {/* Footer (Fixed) */}
+            <div className={`p-6 md:p-8 pt-4 md:pt-6 border-t border-neutral-800/50 shrink-0 bg-[#0a0a0a] flex items-center justify-between ${isBulkMode ? 'flex-row' : 'flex-col space-y-4'}`}>
+                {isBulkMode && (
+                  <div className="text-neutral-400">
+                    <span className="text-[10px] font-bold uppercase block opacity-50">Estimated Bulk Total</span>
+                    <span className="text-lg font-black text-white">
+                      {formatCurrency(bulkRows.reduce((acc, r) => acc + (r.purchasePrice || 0), 0))}
+                    </span>
                   </div>
                 )}
+                <button 
+                    type="submit"
+                    form="resupply-form"
+                    className={`${isBulkMode ? 'w-auto px-10' : 'w-full'} py-4 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-2xl shadow-lg shadow-emerald-900/20 transition-all active:scale-95`}
+                >
+                    {isBulkMode ? 'SUBMIT BULK ORDER' : 'COMPLETE PROCUREMENT'}
+                </button>
+            </div>
 
-                <div className={`flex items-center justify-between pt-6 border-t border-neutral-800/50 ${isBulkMode ? 'flex-row' : 'flex-col space-y-4'}`}>
-                    {isBulkMode && (
-                      <div className="text-neutral-400">
-                        <span className="text-[10px] font-bold uppercase block opacity-50">Estimated Bulk Total</span>
-                        <span className="text-lg font-black text-white">
-                          {formatCurrency(bulkRows.reduce((acc, r) => acc + (r.purchasePrice || 0), 0))}
-                        </span>
-                      </div>
-                    )}
-                    <button 
-                        type="submit"
-                        className={`${isBulkMode ? 'w-auto px-10' : 'w-full'} py-4 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-2xl shadow-lg shadow-emerald-900/20 transition-all active:scale-95`}
-                    >
-                        {isBulkMode ? 'SUBMIT BULK ORDER' : 'COMPLETE PROCUREMENT'}
-                    </button>
-                </div>
-            </form>
           </div>
         </div>
       )}
@@ -4306,7 +4443,7 @@ const App: React.FC = () => {
       {isReturnModalOpen && rentalToReturn && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setIsReturnModalOpen(false)} />
-          <div className="relative w-[95%] max-w-2xl bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+          <div className="relative w-full max-w-2xl bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
             <div className="flex items-center justify-between mb-8 shrink-0">
               <div>
                 <h2 className="text-xl font-bold flex items-center">
@@ -4573,7 +4710,7 @@ const App: React.FC = () => {
       {isExtendModalOpen && rentalToExtend && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setIsExtendModalOpen(false)} />
-          <div className="relative w-[95%] max-w-lg bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col">
+          <div className="relative w-full max-w-lg bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col">
             <div className="flex items-center justify-between mb-8 shrink-0">
               <div>
                 <h2 className="text-xl font-bold flex items-center">
