@@ -60,12 +60,17 @@ export interface Rental {
   paymentStatus: 'Paid' | 'Pending' | 'Overdue';
   totalCost: number;
   lateFee?: number;
+  damageFee?: number;
+  finalRevenue?: number;
   deliveryAddress: string;
   returnSnapshot?: ReturnItemSnapshot[];
   deposit?: number;
   deliveryFee?: number;
   depositStatus?: 'Pending' | 'Refunded' | 'Withheld' | 'Partial';
   refundedAmount?: number;
+  rateType?: 'Daily' | 'Monthly';
+  manualMonths?: number;
+  createdAt?: string;
 }
 
 export interface PurchaseItem {

@@ -42,7 +42,8 @@ import {
   Database,
   Mail,
   Phone,
-  ExternalLink
+  ExternalLink,
+  Printer
 } from 'lucide-react';
 
 import { 
@@ -115,6 +116,7 @@ const App: React.FC = () => {
   const [isPurchaseModalOpen, setIsPurchaseModalOpen] = useState(false);
   const [isCustomerModalOpen, setIsCustomerModalOpen] = useState(false);
   const [isRentalModalOpen, setIsRentalModalOpen] = useState(false);
+  const [isQuotationModalOpen, setIsQuotationModalOpen] = useState(false);
   const [rentalStep, setRentalStep] = useState(1);
   const [editingCustomerId, setEditingCustomerId] = useState<string | null>(null);
   const [selectedItemForHistory, setSelectedItemForHistory] = useState<InventoryItem | null>(null);
@@ -146,6 +148,9 @@ const App: React.FC = () => {
   const [maintenanceItem, setMaintenanceItem] = useState<InventoryItem | null>(null);
   const [maintenanceAction, setMaintenanceAction] = useState<'repair' | 'discard'>('repair');
   const [maintenanceQuantity, setMaintenanceQuantity] = useState<number>(0);
+
+  // Print Invoice State
+  const [rentalToPrint, setRentalToPrint] = useState<Rental | null>(null);
   
   // Return Modal State
   const [isReturnModalOpen, setIsReturnModalOpen] = useState(false);
@@ -154,6 +159,7 @@ const App: React.FC = () => {
   const [returnQuantities, setReturnQuantities] = useState<Record<string, { good: number, damaged: number, missing: number }>>({});
   const [lateFeeMultiplier, setLateFeeMultiplier] = useState<number>(DEFAULT_LATE_FEE_MULTIPLIER);
   const [refundAmount, setRefundAmount] = useState<number>(0);
+  const [damageFee, setDamageFee] = useState<number>(0);
 
   // Extend Rental Modal State
   const [isExtendModalOpen, setIsExtendModalOpen] = useState(false);
@@ -244,6 +250,19 @@ const App: React.FC = () => {
   // Submission State
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isStep4Ready, setIsStep4Ready] = useState(false);
+
+  useEffect(() => {
+    if (rentalToPrint) {
+      const handleAfterPrint = () => setRentalToPrint(null);
+      window.addEventListener('afterprint', handleAfterPrint);
+      
+      setTimeout(() => {
+        window.print();
+      }, 100);
+
+      return () => window.removeEventListener('afterprint', handleAfterPrint);
+    }
+  }, [rentalToPrint]);
 
   // Delay Step 4 button activation to prevent accidental double-clicks
   useEffect(() => {
@@ -382,7 +401,12 @@ const App: React.FC = () => {
   const totalMissingItems = inventory.reduce((acc, i) => acc + (i.missingQuantity || 0), 0);
 
   const stats = {
-    totalRevenue: rentals.reduce((acc, r) => acc + r.totalCost + (r.lateFee || 0) + (r.deliveryFee || 0), 0),
+    totalRevenue: rentals.reduce((acc, r) => {
+        if (r.status === RentalStatus.RETURNED && r.finalRevenue !== undefined) {
+            return acc + r.finalRevenue;
+        }
+        return acc + r.totalCost + (r.lateFee || 0) + (r.deliveryFee || 0);
+    }, 0),
     totalProcurement: purchases.reduce((acc, p) => acc + (p.totalCost || p.purchasePrice || 0), 0),
     activeRentals: rentals.filter(r => r.status === RentalStatus.ACTIVE).length,
     overdueRentals: rentals.filter(r => r.status === RentalStatus.OVERDUE).length,
@@ -623,6 +647,24 @@ const App: React.FC = () => {
     setIsRentalModalOpen(true);
   };
 
+  const handleOpenQuotationModal = () => {
+    setRentalForm({
+      customerId: '',
+      startDate: new Date().toISOString().split('T')[0],
+      endDate: '',
+      items: [{ id: Math.random().toString(36).substr(2, 9), itemId: '', quantity: 1 }],
+      rateType: 'Daily',
+      manualMonths: 1,
+      deliveryAddress: '',
+      deposit: 0,
+      deliveryFee: 0,
+      paymentStatus: 'Pending'
+    });
+    setSetCount(1);
+    setRentalStep(1);
+    setIsQuotationModalOpen(true);
+  };
+
   const addRentalItemRow = () => {
     setRentalForm(prev => ({
       ...prev,
@@ -787,6 +829,8 @@ const App: React.FC = () => {
           deliveryAddress: rentalForm.deliveryAddress,
           deposit: rentalForm.deposit,
           deliveryFee: rentalForm.deliveryFee,
+          rateType: rentalForm.rateType,
+          manualMonths: rentalForm.manualMonths,
           ...(rentalForm.deposit > 0 && { depositStatus: 'Pending' })
         };
 
@@ -822,6 +866,23 @@ const App: React.FC = () => {
     } finally {
         setIsSubmitting(false);
     }
+  };
+
+  const handleCreateQuotation = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (rentalStep !== 4) return;
+    if (!rentalForm.customerId || !rentalForm.startDate || !rentalForm.endDate || !rentalForm.deliveryAddress) return;
+
+    const tempQuotation: Rental = {
+      ...rentalForm,
+      id: `QUOTE-${Math.random().toString(36).substr(2, 9).toUpperCase()}`,
+      status: RentalStatus.ACTIVE,
+      createdAt: new Date().toISOString(),
+      totalCost: calculateRentalTotal(),
+    };
+    
+    setRentalToPrint(tempQuotation);
+    setIsQuotationModalOpen(false);
   };
 
   const cyclePaymentStatus = async (e: React.MouseEvent, rentalId: string, currentStatus: string) => {
@@ -936,6 +997,7 @@ const App: React.FC = () => {
     setLateFeeMultiplier(DEFAULT_LATE_FEE_MULTIPLIER);
     // Initialize refund amount to full deposit if exists
     setRefundAmount(rental.deposit || 0);
+    setDamageFee(0);
     
     // Initialize quantities with assumption all are good
     const initialQty: Record<string, { good: number, damaged: number, missing: number }> = {};
@@ -963,45 +1025,14 @@ const App: React.FC = () => {
   };
 
   const calculateReturnFinancials = () => {
-    if (!rentalToReturn || !returnDate) return { baseCost: 0, lateFee: 0, total: 0, overdueDays: 0 };
+    if (!rentalToReturn) return { baseCost: 0, total: 0 };
     
-    const start = new Date(rentalToReturn.startDate);
-    const endContract = new Date(rentalToReturn.endDate);
-    const actualReturn = new Date(returnDate);
-
-    const endBaseCalc = actualReturn < endContract ? actualReturn : endContract;
-    const baseDiffTime = endBaseCalc.getTime() - start.getTime();
-    let baseDays = Math.ceil(baseDiffTime / (1000 * 60 * 60 * 24));
-    if (baseDays <= 0) baseDays = 1;
-
-    const baseCost = rentalToReturn.items.reduce((total, rItem) => {
-      const item = inventory.find(i => i.id === rItem.itemId);
-      if (!item) return total;
-      return total + getItemRentalCost(item, rItem.quantity, baseDays, false);
-    }, 0);
-
-    let lateFee = 0;
-    let overdueDays = 0;
-
-    if (actualReturn > endContract) {
-        const lateDiffTime = actualReturn.getTime() - endContract.getTime();
-        overdueDays = Math.ceil(lateDiffTime / (1000 * 60 * 60 * 24));
-        
-        if (overdueDays > 0) {
-            lateFee = rentalToReturn.items.reduce((total, rItem) => {
-                const item = inventory.find(i => i.id === rItem.itemId);
-                if (!item) return total;
-                const dailyLateCost = getItemRentalCost(item, rItem.quantity, overdueDays, false);
-                return total + (dailyLateCost * lateFeeMultiplier);
-            }, 0);
-        }
-    }
+    const baseCost = rentalToReturn.totalCost;
+    const total = baseCost + (rentalToReturn.deliveryFee || 0) + damageFee;
 
     return {
         baseCost,
-        lateFee,
-        total: baseCost + lateFee,
-        overdueDays
+        total
     };
   };
 
@@ -1030,7 +1061,7 @@ const App: React.FC = () => {
         }
     }
 
-    const { total, lateFee } = calculateReturnFinancials();
+    const { total } = calculateReturnFinancials();
 
     // 1. Update Inventory in DB
     const updatedInventory = [...inventory];
@@ -1063,11 +1094,11 @@ const App: React.FC = () => {
           ...rentalToReturn, 
           status: RentalStatus.RETURNED,
           endDate: returnDate,
-          totalCost: total,
-          ...(lateFee > 0 && { lateFee }),
+          ...(damageFee > 0 && { damageFee }),
           returnSnapshot: snapshot,
           ...(depositStatus && { depositStatus }),
-          refundedAmount: refundAmount
+          refundedAmount: refundAmount,
+          finalRevenue: total
     };
 
     await updateRental(updatedRental);
@@ -1163,7 +1194,7 @@ const App: React.FC = () => {
 
       const supplierName = validRows[0].supplier; // Use the first row's supplier as the main supplier
       const totalCost = validRows.reduce((sum, row) => sum + row.purchasePrice, 0);
-      const paymentStatus = validRows.every(row => row.paymentStatus === 'Paid') ? 'Paid' : 'Pending';
+      const paymentStatus: 'Paid' | 'Pending' = validRows.every(row => row.paymentStatus === 'Paid') ? 'Paid' : 'Pending';
 
       const items = validRows.map(row => ({
         itemId: row.itemId,
@@ -1294,7 +1325,8 @@ const App: React.FC = () => {
   }
 
   return (
-    <div className="flex h-[100dvh] overflow-hidden bg-black text-neutral-100 selection:bg-blue-500/30">
+    <>
+      <div className="flex h-[100dvh] overflow-hidden bg-black text-neutral-100 selection:bg-blue-500/30 print:hidden">
       {/* Mobile Backdrop */}
       {isSidebarOpen && (
         <div 
@@ -1499,12 +1531,20 @@ const App: React.FC = () => {
                       <Plus size={18} className="md:mr-2" /> <span className="hidden md:inline">ADD CLIENT</span>
                     </button>
                   ) : view === 'rentals' ? (
-                    <button 
-                      onClick={handleOpenRentalModal}
-                      className="bg-blue-600 hover:bg-blue-500 text-white px-3 md:px-5 py-2.5 rounded-xl text-sm font-bold flex items-center shadow-lg shadow-blue-900/20 transition-all active:scale-95"
-                    >
-                      <FileText size={18} className="md:mr-2" /> <span className="hidden md:inline">NEW RENTAL</span>
-                    </button>
+                    <div className="flex items-center space-x-3">
+                      <button 
+                        onClick={handleOpenQuotationModal}
+                        className="bg-neutral-800 hover:bg-neutral-700 text-neutral-300 border border-neutral-700 px-3 md:px-5 py-2.5 rounded-xl text-sm font-bold flex items-center transition-all active:scale-95"
+                      >
+                        <FileText size={18} className="md:mr-2" /> <span className="hidden md:inline">CREATE QUOTATION</span>
+                      </button>
+                      <button 
+                        onClick={handleOpenRentalModal}
+                        className="bg-blue-600 hover:bg-blue-500 text-white px-3 md:px-5 py-2.5 rounded-xl text-sm font-bold flex items-center shadow-lg shadow-blue-900/20 transition-all active:scale-95"
+                      >
+                        <Plus size={18} className="md:mr-2" /> <span className="hidden md:inline">NEW RENTAL</span>
+                      </button>
+                    </div>
                   ) : view === 'inventory' ? (
                     <button 
                       onClick={() => {
@@ -2830,7 +2870,9 @@ const App: React.FC = () => {
                         // ... rendering for mobile list ...
                         const customer = customers.find(c => c.id === rental.customerId);
                         const isExpanded = expandedRentalId === rental.id;
-                        const finalInvoiceTotal = rental.totalCost + (rental.deliveryFee || 0) + (rental.lateFee || 0);
+                        const finalInvoiceTotal = rental.status === RentalStatus.RETURNED && rental.finalRevenue !== undefined
+                            ? rental.finalRevenue
+                            : rental.totalCost + (rental.deliveryFee || 0) + (rental.lateFee || 0);
 
                         return (
                            <div key={rental.id} className="bg-[#0a0a0a] rounded-2xl border border-neutral-800 p-5 shadow-sm relative overflow-hidden" onClick={() => toggleRentalExpand(rental.id)}>
@@ -2971,7 +3013,9 @@ const App: React.FC = () => {
                            const diffTime = Math.abs(end.getTime() - start.getTime());
                            const durationDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
-                           const finalInvoiceTotal = rental.totalCost + (rental.deliveryFee || 0) + (rental.lateFee || 0);
+                           const finalInvoiceTotal = rental.status === RentalStatus.RETURNED && rental.finalRevenue !== undefined
+                               ? rental.finalRevenue
+                               : rental.totalCost + (rental.deliveryFee || 0) + (rental.lateFee || 0);
 
                            return (
                              <React.Fragment key={rental.id}>
@@ -3135,6 +3179,18 @@ const App: React.FC = () => {
                                                                <div className="flex justify-between items-center text-sm">
                                                                    <span className="text-rose-400 font-bold">Late Fees</span>
                                                                    <span className="text-rose-400 font-bold">{formatCurrency(rental.lateFee)}</span>
+                                                               </div>
+                                                           )}
+                                                           {rental.damageFee && rental.damageFee > 0 && (
+                                                               <div className="flex justify-between items-center text-sm">
+                                                                   <span className="text-amber-400 font-bold">Damage Fees</span>
+                                                                   <span className="text-amber-400 font-bold">{formatCurrency(rental.damageFee)}</span>
+                                                               </div>
+                                                           )}
+                                                           {rental.deposit && rental.deposit > 0 && rental.status === RentalStatus.RETURNED && (
+                                                               <div className="flex justify-between items-center text-sm">
+                                                                   <span className="text-emerald-400 font-bold">Deposit Refunded</span>
+                                                                   <span className="text-emerald-400 font-bold">-{formatCurrency(rental.refundedAmount || 0)}</span>
                                                                </div>
                                                            )}
                                                            <div className="border-t border-neutral-700/50 pt-3 mt-2 flex justify-between items-center">
@@ -4439,6 +4495,425 @@ const App: React.FC = () => {
         </div>
       )}
 
+      {/* Quotation Modal */}
+      {isQuotationModalOpen && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setIsQuotationModalOpen(false)} />
+          <div className="relative w-full max-w-2xl bg-[#0a0a0a] border border-neutral-800 rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between px-5 py-4 md:px-8 md:py-6 border-b border-neutral-800 shrink-0 bg-[#0a0a0a] z-10">
+                <div>
+                  <h2 className="text-lg md:text-xl font-bold flex items-center text-white">
+                      <FileText size={20} className="mr-2 text-blue-500" /> Create Quotation
+                  </h2>
+                  <div className="flex items-center mt-1.5 space-x-2">
+                    <span className="px-2 py-0.5 rounded bg-neutral-800 text-[10px] font-bold text-neutral-400 uppercase tracking-wider">
+                      Step {rentalStep}/4
+                    </span>
+                    <span className="text-xs text-neutral-500 font-medium">
+                      {rentalStep === 1 ? "Client & Type" :
+                       rentalStep === 2 ? "Rental Period" :
+                       rentalStep === 3 ? "Select Equipment" :
+                       "Final Details"}
+                    </span>
+                  </div>
+                </div>
+                <button onClick={() => setIsQuotationModalOpen(false)} className="p-2 -mr-2 text-neutral-500 hover:text-white transition-colors rounded-full hover:bg-neutral-800">
+                    <X size={20} />
+                </button>
+            </div>
+
+            <form onSubmit={handleCreateQuotation} className="flex-1 flex flex-col min-h-0 bg-[#0a0a0a]">
+              <div className="flex-1 overflow-y-auto p-5 md:p-8 space-y-6 touch-pan-y">
+                
+                {/* Step 1: Client & Type */}
+                {rentalStep === 1 && (
+                  <div className="space-y-6 animate-in fade-in slide-in-from-right-8 duration-300">
+                    <div>
+                        <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">Contract Type</label>
+                        <div className="flex bg-neutral-900 p-1.5 rounded-xl border border-neutral-800">
+                            <button
+                                type="button"
+                                onClick={() => setRentalForm({...rentalForm, rateType: 'Daily'})}
+                                className={`flex-1 py-3 text-xs md:text-sm font-bold rounded-lg transition-all ${rentalForm.rateType === 'Daily' ? 'bg-blue-600 text-white shadow-md' : 'text-neutral-500 hover:text-neutral-300'}`}
+                            >
+                                Daily / Custom
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                     const start = new Date(rentalForm.startDate);
+                                     start.setMonth(start.getMonth() + 1);
+                                     setRentalForm({
+                                        ...rentalForm, 
+                                        rateType: 'Monthly', 
+                                        manualMonths: 1,
+                                        endDate: start.toISOString().split('T')[0]
+                                     });
+                                }}
+                                className={`flex-1 py-3 text-xs md:text-sm font-bold rounded-lg transition-all ${rentalForm.rateType === 'Monthly' ? 'bg-blue-600 text-white shadow-md' : 'text-neutral-500 hover:text-neutral-300'}`}
+                            >
+                                Monthly Fixed
+                            </button>
+                        </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">Select Client</label>
+                      <select 
+                        required
+                        className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white appearance-none"
+                        value={rentalForm.customerId}
+                        onChange={(e) => {
+                          const selectedCId = e.target.value;
+                          const client = customers.find(c => c.id === selectedCId);
+                          setRentalForm({ 
+                            ...rentalForm, 
+                            customerId: selectedCId,
+                            deliveryAddress: client ? client.address : '' 
+                          });
+                        }}
+                      >
+                        <option value="">Select a Client...</option>
+                        {customers.map(c => (
+                          <option key={c.id} value={c.id}>{c.name} - {c.company}</option>
+                        ))}
+                      </select>
+                      <div className="mt-2 text-[10px] text-neutral-500 px-1">
+                        * Selecting a client will auto-fill the delivery address in the final step.
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Step 2: Dates */}
+                {rentalStep === 2 && (
+                  <div className="space-y-6 animate-in fade-in slide-in-from-right-8 duration-300">
+                    <div>
+                      <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">Start Date</label>
+                      <div className="relative">
+                        <Calendar className="absolute left-4 top-1/2 -translate-y-1/2 text-neutral-500 pointer-events-none" size={18} />
+                        <input 
+                          required
+                          type="date"
+                          className="w-full h-12 bg-neutral-900 border border-neutral-800 rounded-xl pl-12 pr-4 py-3 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white appearance-none [color-scheme:dark] text-left"
+                          value={rentalForm.startDate}
+                          onChange={(e) => {
+                               const newStart = e.target.value;
+                               if (rentalForm.rateType === 'Monthly') {
+                                   const start = new Date(newStart);
+                                   start.setMonth(start.getMonth() + rentalForm.manualMonths);
+                                   setRentalForm({ 
+                                      ...rentalForm, 
+                                      startDate: newStart,
+                                      endDate: start.toISOString().split('T')[0]
+                                   });
+                               } else {
+                                   setRentalForm({ ...rentalForm, startDate: newStart });
+                               }
+                          }}
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      {rentalForm.rateType === 'Daily' ? (
+                          <>
+                              <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">End Date</label>
+                              <div className="relative">
+                              <Calendar className="absolute left-4 top-1/2 -translate-y-1/2 text-neutral-500 pointer-events-none" size={18} />
+                              <input 
+                                  required
+                                  type="date"
+                                  className="w-full h-12 bg-neutral-900 border border-neutral-800 rounded-xl pl-12 pr-4 py-3 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white appearance-none [color-scheme:dark] text-left"
+                                  value={rentalForm.endDate}
+                                  min={rentalForm.startDate}
+                                  onChange={(e) => setRentalForm({ ...rentalForm, endDate: e.target.value })}
+                              />
+                              </div>
+                          </>
+                      ) : (
+                          <>
+                              <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">Duration (Months)</label>
+                              <div className="relative">
+                              <Clock className="absolute left-4 top-1/2 -translate-y-1/2 text-neutral-500" size={18} />
+                              <input 
+                                  required
+                                  type="number"
+                                  min="1"
+                                  step="0.5"
+                                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl pl-12 pr-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white"
+                                  value={rentalForm.manualMonths}
+                                  onChange={(e) => {
+                                      const months = parseFloat(e.target.value) || 0;
+                                      const start = new Date(rentalForm.startDate);
+                                      start.setMonth(start.getMonth() + months);
+                                      setRentalForm({ 
+                                          ...rentalForm, 
+                                          manualMonths: months,
+                                          endDate: start.toISOString().split('T')[0]
+                                      });
+                                  }}
+                              />
+                              </div>
+                          </>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Step 3: Equipment */}
+                {rentalStep === 3 && (
+                  <div className="space-y-6 animate-in fade-in slide-in-from-right-8 duration-300">
+                    {/* Quick Add Set UI */}
+                    <div className="bg-gradient-to-br from-blue-900/20 to-blue-900/5 border border-blue-500/20 rounded-2xl p-4 md:p-5">
+                        <div className="flex flex-col gap-4">
+                            <div className="flex items-start space-x-4">
+                                <div className="p-3 bg-blue-600 rounded-xl text-white shrink-0 shadow-lg shadow-blue-600/20">
+                                    <Layers size={24} />
+                                </div>
+                                <div>
+                                    <h4 className="text-base font-bold text-white">Quick Add Set</h4>
+                                    <p className="text-[11px] text-neutral-400 mt-1 leading-relaxed">
+                                      Includes: 2x Main Frame, 2x Cross Brace, 4x Join Pin
+                                    </p>
+                                </div>
+                            </div>
+                            
+                            <div className="flex items-center gap-3 bg-black/20 p-2 rounded-xl border border-white/5">
+                                <div className="flex-1 flex flex-col px-2">
+                                    <label className="text-[9px] font-black uppercase tracking-widest text-neutral-500 mb-0.5">Quantity</label>
+                                    <input 
+                                        type="number" 
+                                        min="1"
+                                        value={setCount}
+                                        onChange={(e) => setSetCount(Math.max(1, parseInt(e.target.value) || 0))}
+                                        className="w-full bg-transparent font-bold text-white focus:outline-none text-lg"
+                                    />
+                                </div>
+                                <button 
+                                    type="button"
+                                    onClick={handleAddSet}
+                                    className="h-10 px-4 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-lg transition-all active:scale-95 flex items-center justify-center shadow-lg text-sm"
+                                >
+                                    <Plus size={16} className="mr-2" /> Add
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="flex items-center justify-between mb-2 border-b border-neutral-800 pb-3">
+                        <h3 className="text-sm font-bold text-white">Equipment List</h3>
+                        <span className="text-[10px] font-bold text-neutral-400 bg-neutral-900 border border-neutral-800 px-2 py-1 rounded-lg">
+                        {rentalForm.rateType === 'Daily' 
+                            ? `${calculateDaysDiff()} Days` 
+                            : `${rentalForm.manualMonths} Months`}
+                        </span>
+                    </div>
+
+                    <div className="space-y-3">
+                        {rentalForm.items.map((row, index) => {
+                        const item = inventory.find(i => i.id === row.itemId);
+                        const subtotal = item 
+                            ? getItemRentalCost(
+                                item, 
+                                row.quantity, 
+                                rentalForm.rateType === 'Monthly' ? rentalForm.manualMonths : calculateDaysDiff(), 
+                                rentalForm.rateType === 'Monthly'
+                                ) 
+                            : 0;
+                        
+                        return (
+                            <div key={row.id} className="relative bg-neutral-900/60 p-4 rounded-2xl border border-neutral-800 hover:border-blue-500/30 transition-all group">
+                                <button 
+                                    type="button"
+                                    onClick={() => removeRentalItemRow(row.id)}
+                                    className="absolute -top-2 -right-2 bg-neutral-800 text-neutral-400 hover:text-rose-500 hover:bg-neutral-700 p-1.5 rounded-full border border-neutral-700 shadow-sm transition-all z-10"
+                                >
+                                    <X size={14} />
+                                </button>
+
+                                <div className="grid grid-cols-1 gap-4">
+                                    {/* Item Select */}
+                                    <div>
+                                        <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1.5">Item Name</label>
+                                        <div className="relative">
+                                            <select 
+                                                required
+                                                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl pl-3 pr-8 py-3 text-sm focus:ring-1 focus:ring-blue-500 outline-none text-white appearance-none"
+                                                value={row.itemId}
+                                                onChange={(e) => updateRentalItemRow(row.id, 'itemId', e.target.value)}
+                                            >
+                                                <option value="">Choose item...</option>
+                                                {inventory.map(item => (
+                                                    <option key={item.id} value={item.id}>{item.name}</option>
+                                                ))}
+                                            </select>
+                                            <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-500 pointer-events-none" size={14} />
+                                        </div>
+                                    </div>
+
+                                    <div className="grid grid-cols-12 gap-3">
+                                        <div className="col-span-5">
+                                            <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1">Rate</label>
+                                            <div className="text-xs font-bold text-neutral-400 py-3 px-3 bg-neutral-950 rounded-xl border border-neutral-800 truncate">
+                                                {item ? formatCurrency(rentalForm.rateType === 'Monthly' ? item.monthlyPrice : item.unitPrice) : '-'}
+                                            </div>
+                                        </div>
+                                        <div className="col-span-3">
+                                            <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1">Qty</label>
+                                            <input 
+                                                required
+                                                type="number"
+                                                min="1"
+                                                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-2 py-2.5 text-sm focus:ring-1 focus:ring-blue-500 outline-none text-white font-bold text-center"
+                                                value={row.quantity}
+                                                onChange={(e) => updateRentalItemRow(row.id, 'quantity', parseInt(e.target.value) || 0)}
+                                            />
+                                        </div>
+                                        <div className="col-span-4">
+                                            <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1 text-right">Subtotal</label>
+                                            <div className="text-xs font-bold text-white py-3 px-3 bg-neutral-950 rounded-xl border border-neutral-800 text-right truncate">
+                                                {formatCurrency(subtotal)}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        );
+                        })}
+                    </div>
+                   
+                    <button 
+                      type="button"
+                      onClick={addRentalItemRow}
+                      className="w-full py-3.5 border border-dashed border-neutral-800 rounded-xl flex items-center justify-center text-neutral-500 hover:text-blue-500 hover:border-blue-500/30 hover:bg-blue-500/5 transition-all text-xs font-bold uppercase tracking-widest mt-4 group"
+                    >
+                      <Plus size={16} className="mr-2 group-hover:scale-110 transition-transform" /> Add Item
+                    </button>
+                  </div>
+                )}
+
+                {/* Step 4: Details */}
+                {rentalStep === 4 && (
+                  <div className="space-y-6 animate-in fade-in slide-in-from-right-8 duration-300">
+                    <div>
+                       <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">Delivery Location <span className="text-rose-500">*</span></label>
+                       <textarea
+                          required
+                          rows={3}
+                          className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white placeholder-neutral-600"
+                          value={rentalForm.deliveryAddress}
+                          onChange={(e) => setRentalForm({ ...rentalForm, deliveryAddress: e.target.value })}
+                          placeholder="Enter the specific project site address..."
+                       />
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-5 bg-neutral-900/50 p-5 rounded-2xl border border-neutral-800/50">
+                       <div>
+                           <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">Security Deposit (IDR)</label>
+                           <div className="relative">
+                               <Wallet className="absolute left-4 top-1/2 -translate-y-1/2 text-neutral-500" size={18} />
+                               <input 
+                                    type="number"
+                                    min="0"
+                                    className="w-full bg-neutral-900 border border-neutral-700 rounded-xl pl-12 pr-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-emerald-500 outline-none transition-all text-white placeholder-neutral-600"
+                                    value={rentalForm.deposit}
+                                    onChange={(e) => setRentalForm({ ...rentalForm, deposit: parseInt(e.target.value) || 0 })}
+                                    placeholder="0"
+                               />
+                           </div>
+                       </div>
+                       <div>
+                           <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">Delivery & Setup Fee (IDR)</label>
+                           <div className="relative">
+                               <Truck className="absolute left-4 top-1/2 -translate-y-1/2 text-neutral-500" size={18} />
+                               <input 
+                                    type="number"
+                                    min="0"
+                                    className="w-full bg-neutral-900 border border-neutral-700 rounded-xl pl-12 pr-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white placeholder-neutral-600"
+                                    value={rentalForm.deliveryFee}
+                                    onChange={(e) => setRentalForm({ ...rentalForm, deliveryFee: parseInt(e.target.value) || 0 })}
+                                    placeholder="0"
+                               />
+                           </div>
+                       </div>
+                    </div>
+
+                    <div className="bg-neutral-900 p-5 rounded-2xl border border-neutral-800">
+                        <div className="flex justify-between items-center mb-3">
+                            <span className="text-xs text-neutral-400">Rental Subtotal</span>
+                            <span className="text-sm font-bold text-white">{formatCurrency(calculateRentalTotal())}</span>
+                        </div>
+                        <div className="flex justify-between items-center mb-3">
+                            <span className="text-xs text-neutral-400">Delivery Fee</span>
+                            <span className="text-sm font-bold text-white">{formatCurrency(rentalForm.deliveryFee)}</span>
+                        </div>
+                        <div className="flex justify-between items-center pt-4 border-t border-neutral-800 mt-2">
+                            <span className="text-sm font-bold text-white">Total Estimated</span>
+                            <span className="text-2xl font-black text-blue-500">{formatCurrency(calculateRentalTotal() + rentalForm.deliveryFee)}</span>
+                        </div>
+                    </div>
+                  </div>
+                )}
+
+              </div>
+
+              {/* Footer Actions */}
+              <div className="p-5 md:p-8 border-t border-neutral-800 bg-[#0a0a0a] flex items-center justify-between shrink-0 z-10">
+                  {rentalStep > 1 ? (
+                    <button 
+                      type="button" 
+                      onClick={(e) => {
+                        e.preventDefault();
+                        setRentalStep(s => s - 1);
+                      }}
+                      className="px-6 py-3.5 rounded-xl font-bold text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors text-sm"
+                    >
+                      Back
+                    </button>
+                  ) : (
+                    <div></div> 
+                  )}
+
+                  {rentalStep < 4 ? (
+                    <button 
+                      type="button"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        if (rentalStep === 1 && !rentalForm.customerId) {
+                          alert("Please select a client.");
+                          return;
+                        }
+                        if (rentalStep === 2 && (!rentalForm.startDate || (!rentalForm.endDate && rentalForm.rateType === 'Daily'))) {
+                          alert("Please select valid dates.");
+                          return;
+                        }
+                        if (rentalStep === 3 && rentalForm.items.filter(i => i.itemId && i.quantity > 0).length === 0) {
+                          alert("Please add at least one item.");
+                          return;
+                        }
+                        setRentalStep(s => s + 1);
+                      }}
+                      className="bg-blue-600 hover:bg-blue-500 text-white px-8 py-3.5 rounded-xl font-bold text-sm shadow-lg shadow-blue-600/20 transition-all active:scale-95 flex items-center"
+                    >
+                      Next Step <ChevronRight size={18} className="ml-2" />
+                    </button>
+                  ) : (
+                    <button 
+                      type="submit"
+                      disabled={!isStep4Ready}
+                      className={`bg-emerald-600 hover:bg-emerald-500 text-white px-8 py-3.5 rounded-xl font-bold text-sm shadow-lg shadow-emerald-600/20 transition-all active:scale-95 flex items-center ${(!isStep4Ready) ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    >
+                      <CheckCircle2 size={18} className="mr-2" />
+                      Generate Quotation
+                    </button>
+                  )}
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Return Rental Modal */}
       {isReturnModalOpen && rentalToReturn && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
@@ -4456,57 +4931,12 @@ const App: React.FC = () => {
               </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto custom-scrollbar pr-2 space-y-6">
-                <div className="bg-neutral-900/50 rounded-xl p-4 border border-neutral-800/50 flex flex-col gap-4">
-                    <div className="flex justify-between items-center">
-                        <div>
-                            <div className="text-[10px] font-black text-neutral-500 uppercase tracking-widest">Transaction</div>
-                            <div className="text-sm font-mono font-bold text-blue-400">#{rentalToReturn.id.slice(0,8).toUpperCase()}...</div>
-                        </div>
-                        <div className="text-right">
-                             <div className="text-[10px] font-black text-neutral-500 uppercase tracking-widest">Contract Due Date</div>
-                             <div className="text-sm font-bold text-white">{rentalToReturn.endDate}</div>
-                        </div>
-                    </div>
-                    
-                    <div className="grid grid-cols-2 gap-4">
-                        <div>
-                             <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1">Actual Return Date</label>
-                             <input 
-                                type="date"
-                                className="w-full h-12 bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-3 text-base md:text-sm focus:ring-1 focus:ring-blue-500 outline-none text-white appearance-none [color-scheme:dark] text-left"
-                                value={returnDate}
-                                onChange={(e) => setReturnDate(e.target.value)}
-                            />
-                        </div>
-                         <div>
-                             <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1">Late Fee Rate (Multiplier)</label>
-                             <div className="flex items-center space-x-2">
-                                <span className="text-xs text-neutral-400 font-bold">x</span>
-                                <input 
-                                    type="number"
-                                    min="1"
-                                    step="0.1"
-                                    className="w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-1.5 text-xs focus:ring-1 focus:ring-blue-500 outline-none text-white font-bold"
-                                    value={lateFeeMultiplier}
-                                    onChange={(e) => setLateFeeMultiplier(parseFloat(e.target.value) || 1)}
-                                />
-                             </div>
-                        </div>
-                    </div>
-
-                    {calculateReturnFinancials().overdueDays > 0 && (
-                        <div className="bg-rose-500/10 border border-rose-500/20 rounded-lg p-3 flex items-start space-x-3">
-                             <AlertCircle size={16} className="text-rose-500 mt-0.5" />
-                             <div>
-                                 <p className="text-xs font-bold text-rose-500 uppercase tracking-wide">Overdue by {calculateReturnFinancials().overdueDays} Day(s)</p>
-                                 <p className="text-[10px] text-neutral-400">A late fee will be applied based on the multiplier configured.</p>
-                             </div>
-                        </div>
-                    )}
-                </div>
-
-                <div className="space-y-4">
+            <div className="flex flex-col flex-1 overflow-y-auto custom-scrollbar pr-2 space-y-6 pb-4">
+                {/* SECTION 1: INVENTORY TRACKING */}
+                <div className="h-auto flex-shrink-0 space-y-4">
+                    <h3 className="text-sm font-bold text-white flex items-center uppercase tracking-widest">
+                        <RotateCcw size={16} className="mr-2 text-blue-500" /> Inventory Tracking
+                    </h3>
                     <div className="grid grid-cols-12 gap-2 md:gap-4 px-2 pb-2 border-b border-neutral-800/50 text-[9px] font-black text-neutral-500 uppercase tracking-widest">
                         <div className="col-span-5">Item</div>
                         <div className="col-span-2 text-center">Good</div>
@@ -4572,8 +5002,8 @@ const App: React.FC = () => {
                     })}
                 </div>
 
-                {/* Inventory Impact Preview */}
-                <div className="bg-neutral-900/30 rounded-xl p-5 border border-neutral-800/50 mt-6">
+                {/* Projected Inventory Updates */}
+                <div className="bg-neutral-900/30 rounded-xl p-5 border border-neutral-800/50 mt-6 h-auto flex-shrink-0">
                    <h4 className="text-xs font-bold text-white mb-4 flex items-center uppercase tracking-widest">
                       <TrendingUp size={14} className="mr-2 text-blue-500" /> Projected Inventory Updates
                    </h4>
@@ -4639,52 +5069,66 @@ const App: React.FC = () => {
                       })}
                    </div>
                 </div>
-            </div>
 
-            <div className="pt-6 border-t border-neutral-800/50 mt-2 shrink-0">
-                {rentalToReturn.deposit && rentalToReturn.deposit > 0 && (
-                  <div className="mb-6 p-4 rounded-xl bg-neutral-900 border border-neutral-800">
-                    <h4 className="text-xs font-bold text-white mb-3 flex items-center">
-                       <Wallet size={14} className="mr-2 text-amber-500" /> Security Deposit Management
-                    </h4>
-                    <div className="flex items-end justify-between gap-4">
-                       <div>
-                          <p className="text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1">Deposit Held</p>
-                          <p className="text-lg font-bold text-neutral-300">{formatCurrency(rentalToReturn.deposit)}</p>
-                       </div>
-                       <div className="flex-1">
-                          <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1">Refund Amount</label>
-                          <input 
-                             type="number"
-                             min="0"
-                             max={rentalToReturn.deposit}
-                             value={refundAmount}
-                             onChange={(e) => setRefundAmount(Math.min(rentalToReturn.deposit || 0, Math.max(0, parseInt(e.target.value) || 0)))}
-                             className="w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm font-bold text-white focus:ring-1 focus:ring-emerald-500 outline-none"
-                          />
-                       </div>
-                       <div className="hidden md:block">
-                          <p className="text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1">Action Status</p>
-                          <div className={`text-xs font-bold px-3 py-2 rounded-lg border ${
-                             refundAmount === rentalToReturn.deposit ? 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20' :
-                             refundAmount === 0 ? 'bg-rose-500/10 text-rose-500 border-rose-500/20' :
-                             'bg-amber-500/10 text-amber-500 border-amber-500/20'
-                          }`}>
-                             {refundAmount === rentalToReturn.deposit ? 'FULL REFUND' : refundAmount === 0 ? 'WITHHOLD' : 'PARTIAL REFUND'}
-                          </div>
-                       </div>
-                    </div>
+                <div className="pt-6 border-t border-neutral-800/50 mt-2 h-auto flex-shrink-0">
+                {/* SECTION 2: DEPOSIT MANAGEMENT */}
+                <div className="mb-6 p-4 rounded-xl bg-neutral-900 border border-neutral-800">
+                  <h4 className="text-xs font-bold text-white mb-3 flex items-center">
+                     <Wallet size={14} className="mr-2 text-amber-500" /> Security Deposit Management
+                  </h4>
+                  <div className="flex items-end justify-between gap-4">
+                     <div>
+                        <p className="text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1">Deposit Held</p>
+                        <p className="text-lg font-bold text-neutral-300">{formatCurrency(rentalToReturn.deposit || 0)}</p>
+                     </div>
+                     <div className="flex-1">
+                        <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1">Refund Amount</label>
+                        <input 
+                           type="number"
+                           min="0"
+                           max={rentalToReturn.deposit || 0}
+                           value={refundAmount}
+                           onChange={(e) => setRefundAmount(Math.min(rentalToReturn.deposit || 0, Math.max(0, parseInt(e.target.value) || 0)))}
+                           className="w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm font-bold text-white focus:ring-1 focus:ring-emerald-500 outline-none"
+                        />
+                     </div>
+                     <div className="hidden md:block">
+                        <p className="text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1">Action Status</p>
+                        <div className={`text-xs font-bold px-3 py-2 rounded-lg border ${
+                           refundAmount === (rentalToReturn.deposit || 0) && (rentalToReturn.deposit || 0) > 0 ? 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20' :
+                           refundAmount === 0 ? 'bg-rose-500/10 text-rose-500 border-rose-500/20' :
+                           'bg-amber-500/10 text-amber-500 border-amber-500/20'
+                        }`}>
+                           {refundAmount === (rentalToReturn.deposit || 0) && (rentalToReturn.deposit || 0) > 0 ? 'FULL REFUND' : refundAmount === 0 ? 'WITHHOLD' : 'PARTIAL REFUND'}
+                        </div>
+                     </div>
                   </div>
-                )}
+                </div>
+
+                {/* SECTION 3: BILLING & MATH */}
+                <div className="mb-6">
+                    <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1">Additional Damage Fees (IDR)</label>
+                    <input 
+                        type="number"
+                        min="0"
+                        className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-4 py-3 text-sm focus:ring-1 focus:ring-amber-500 outline-none text-white"
+                        value={damageFee}
+                        onChange={(e) => setDamageFee(parseInt(e.target.value) || 0)}
+                        placeholder="0"
+                    />
+                </div>
 
                 <div className="flex justify-between items-end mb-6">
                     <div>
                         <p className="text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1">Cost Breakdown</p>
-                        <div className="text-xs text-neutral-400 flex flex-col">
-                             <span>Base Rental: {formatCurrency(calculateReturnFinancials().baseCost)}</span>
-                             {calculateReturnFinancials().lateFee > 0 && (
-                                <span className="text-rose-400 font-bold">
-                                    + Late Fee: {formatCurrency(calculateReturnFinancials().lateFee)}
+                        <div className="text-xs text-neutral-400 flex flex-col space-y-1">
+                             <span>Original Base Rental: {formatCurrency(rentalToReturn.totalCost)}</span>
+                             {rentalToReturn.deliveryFee && rentalToReturn.deliveryFee > 0 && (
+                                 <span>Delivery Fee: {formatCurrency(rentalToReturn.deliveryFee)}</span>
+                             )}
+                             {damageFee > 0 && (
+                                <span className="text-amber-400 font-bold">
+                                    + Damage Fee: {formatCurrency(damageFee)}
                                 </span>
                              )}
                         </div>
@@ -4704,6 +5148,7 @@ const App: React.FC = () => {
             </div>
           </div>
         </div>
+      </div>
       )}
 
       {/* Extend Rental Modal */}
@@ -4774,6 +5219,115 @@ const App: React.FC = () => {
         </div>
       )}
     </div>
+
+      {/* Hidden Print Invoice */}
+      {rentalToPrint && (
+        <div className="hidden print:block fixed inset-0 bg-white z-[9999] p-12 print:p-16 text-gray-800 font-sans">
+          <style type="text/css" media="print">
+            {`
+              @page { margin: 0; }
+            `}
+          </style>
+          <div className="max-w-4xl mx-auto">
+            {/* Header */}
+            <div className="flex justify-between items-start mb-16">
+              <div>
+                <h1 className="text-4xl font-black italic text-gray-900 tracking-tight">O-BAJA</h1>
+                <p className="text-sm text-gray-500 mt-1 tracking-wide uppercase">Scaffolding Rental</p>
+              </div>
+              <div className="text-right">
+                <h2 className="text-3xl font-light text-gray-400 tracking-widest mb-4">QUOTATION</h2>
+                <div className="text-sm text-gray-600">
+                  <p><span className="font-medium text-gray-400 mr-2">Date:</span> {rentalToPrint.startDate}</p>
+                  <p className="mt-1"><span className="font-medium text-gray-400 mr-2">Quote ID:</span> #{rentalToPrint.id.slice(0, 8).toUpperCase()}</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Client Info */}
+            <div className="mb-16">
+              <h3 className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Customer</h3>
+              {(() => {
+                const customer = customers.find(c => c.id === rentalToPrint.customerId);
+                return customer ? (
+                  <div>
+                    <p className="text-lg font-medium text-gray-900">{customer.name}</p>
+                    {customer.company && customer.company !== 'Private Client' && <p className="text-sm text-gray-600 mt-1">{customer.company}</p>}
+                    <p className="text-sm text-gray-500 mt-1 leading-relaxed">{rentalToPrint.deliveryAddress || customer.address || 'No address provided'}</p>
+                    {customer.phone && <p className="text-sm text-gray-500 mt-1">{customer.phone}</p>}
+                  </div>
+                ) : (
+                  <p className="text-gray-500">Unknown Customer</p>
+                );
+              })()}
+            </div>
+
+            {/* Items Table */}
+            <table className="w-full mb-12">
+              <thead>
+                <tr className="border-b-2 border-gray-200">
+                  <th className="text-left py-3 text-xs font-bold text-gray-400 uppercase tracking-widest">Item Description</th>
+                  <th className="text-center py-3 text-xs font-bold text-gray-400 uppercase tracking-widest">Quantity</th>
+                  <th className="text-right py-3 text-xs font-bold text-gray-400 uppercase tracking-widest">Unit Price</th>
+                  <th className="text-right py-3 text-xs font-bold text-gray-400 uppercase tracking-widest">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rentalToPrint.items.map((rItem, idx) => {
+                  const item = inventory.find(i => i.id === rItem.itemId);
+                  const itemName = item ? item.name : 'Unknown Item';
+                  const unitPrice = item ? (rentalToPrint.rateType === 'Monthly' ? item.monthlyPrice : item.unitPrice) : 0;
+                  const total = unitPrice * rItem.quantity;
+                  return (
+                    <tr key={idx} className="border-b border-gray-100">
+                      <td className="py-3 text-sm font-medium text-gray-900">{itemName}</td>
+                      <td className="py-3 text-sm text-center text-gray-600">{rItem.quantity}</td>
+                      <td className="py-3 text-sm text-right text-gray-600">{formatCurrency(unitPrice)}</td>
+                      <td className="py-3 text-sm text-right font-medium text-gray-900">{formatCurrency(total)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+
+            {/* Fees & Totals */}
+            <div className="flex justify-end mb-16">
+              <div className="w-1/2">
+                <div className="flex justify-between py-3 border-b border-gray-100">
+                  <span className="text-sm text-gray-500">Item Subtotal</span>
+                  <span className="text-sm font-medium text-gray-900">{formatCurrency(rentalToPrint.totalCost)}</span>
+                </div>
+                <div className="flex justify-between py-3 border-b border-gray-100">
+                  <span className="text-sm text-gray-500">Delivery Fee (Transportasi)</span>
+                  <span className="text-sm font-medium text-gray-900">{formatCurrency(rentalToPrint.deliveryFee || 0)}</span>
+                </div>
+                <div className="flex justify-between py-3 border-b border-gray-100">
+                  <span className="text-sm text-gray-500">Deposit (Jaminan)</span>
+                  <span className="text-sm font-medium text-gray-900">{formatCurrency(rentalToPrint.deposit || 0)}</span>
+                </div>
+                {rentalToPrint.lateFee && rentalToPrint.lateFee > 0 && (
+                  <div className="flex justify-between py-3 border-b border-gray-100">
+                    <span className="text-sm text-gray-500">Late Fee</span>
+                    <span className="text-sm font-medium text-gray-900">{formatCurrency(rentalToPrint.lateFee)}</span>
+                  </div>
+                )}
+                <div className="flex justify-between py-5 mt-2 border-t-4 border-gray-900">
+                  <span className="text-base font-bold text-gray-900 uppercase tracking-widest">Estimated Total</span>
+                  <span className="text-3xl font-black text-gray-900">
+                    {formatCurrency(rentalToPrint.totalCost + (rentalToPrint.deliveryFee || 0) + (rentalToPrint.deposit || 0) + (rentalToPrint.lateFee || 0))}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="mt-24 text-center">
+              <p className="text-sm text-gray-500 italic">Thank you for your interest in O-Baja Scaffolding.</p>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 };
 
