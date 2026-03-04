@@ -9,7 +9,7 @@ import {
   QuerySnapshot 
 } from "firebase/firestore";
 import { db } from "./firebase";
-import { InventoryItem, Customer, Rental, Purchase } from "../types";
+import { InventoryItem, Customer, Rental, Purchase, OperationalExpense } from "../types";
 
 // Helper to convert Firestore snapshot to typed array
 const convertSnapshot = <T>(snapshot: QuerySnapshot<DocumentData>): T[] => {
@@ -101,4 +101,25 @@ export const updatePurchase = async (purchase: Purchase): Promise<void> => {
 
 export const deletePurchase = async (id: string): Promise<void> => {
   await deleteDoc(doc(db, "scaffolding_purchases", id));
+};
+
+// --- Operational Expense Functions ---
+export const getOperationalExpenses = async (): Promise<OperationalExpense[]> => {
+  const querySnapshot = await getDocs(collection(db, "operational_expenses"));
+  return convertSnapshot<OperationalExpense>(querySnapshot);
+};
+
+export const addOperationalExpense = async (expense: Omit<OperationalExpense, "id">): Promise<OperationalExpense> => {
+  const docRef = await addDoc(collection(db, "operational_expenses"), expense);
+  return { ...expense, id: docRef.id } as OperationalExpense;
+};
+
+export const updateOperationalExpense = async (expense: OperationalExpense): Promise<void> => {
+  const { id, ...data } = expense;
+  const docRef = doc(db, "operational_expenses", id);
+  await updateDoc(docRef, data);
+};
+
+export const deleteOperationalExpense = async (id: string): Promise<void> => {
+  await deleteDoc(doc(db, "operational_expenses", id));
 };

@@ -95,4 +95,12 @@ export interface Purchase {
   totalCost?: number;
 }
 
-export type ViewType = 'dashboard' | 'inventory' | 'customers' | 'rentals' | 'purchasing' | 'maintenance' | 'losses';
+export interface OperationalExpense {
+  id: string;
+  amount: number;
+  category: 'Fuel' | 'Toll' | 'Parking' | 'Driver Meals' | 'Other';
+  date: string;
+  description: string;
+}
+
+export type ViewType = 'dashboard' | 'inventory' | 'customers' | 'rentals' | 'purchasing' | 'maintenance' | 'losses' | 'finance';

@@ -54,8 +54,10 @@ import {
   RentalStatus,
   Purchase,
   ItemCategory,
-  ReturnItemSnapshot
+  ReturnItemSnapshot,
+  OperationalExpense
 } from './types';
+import { FinanceDashboard } from './FinanceDashboard';
 import { 
   DEFAULT_LATE_FEE_MULTIPLIER
 } from './constants';
@@ -76,7 +78,8 @@ import {
   getPurchases,
   addPurchase,
   updatePurchase,
-  deletePurchase
+  deletePurchase,
+  getOperationalExpenses
 } from './services/db';
 
 interface BulkPurchaseRow {
@@ -103,6 +106,7 @@ const App: React.FC = () => {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [rentals, setRentals] = useState<Rental[]>([]);
   const [purchases, setPurchases] = useState<Purchase[]>([]);
+  const [operationalExpenses, setOperationalExpenses] = useState<OperationalExpense[]>([]);
   
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
@@ -278,17 +282,19 @@ const App: React.FC = () => {
     const loadData = async () => {
       setLoading(true);
       try {
-        const [invData, custData, rentData, purchData] = await Promise.all([
+        const [invData, custData, rentData, purchData, expensesData] = await Promise.all([
           getInventory(),
           getCustomers(),
           getRentals(),
-          getPurchases()
+          getPurchases(),
+          getOperationalExpenses()
         ]);
         
         setInventory(invData);
         setCustomers(custData);
         setRentals(rentData);
         setPurchases(purchData);
+        setOperationalExpenses(expensesData);
       } catch (error) {
         console.error("Failed to load initial data", error);
       } finally {
@@ -406,7 +412,7 @@ const App: React.FC = () => {
             return acc + r.finalRevenue;
         }
         return acc + r.totalCost + (r.lateFee || 0) + (r.deliveryFee || 0);
-    }, 0),
+    }, 0) - operationalExpenses.reduce((acc, e) => acc + e.amount, 0),
     totalProcurement: purchases.reduce((acc, p) => acc + (p.totalCost || p.purchasePrice || 0), 0),
     activeRentals: rentals.filter(r => r.status === RentalStatus.ACTIVE).length,
     overdueRentals: rentals.filter(r => r.status === RentalStatus.OVERDUE).length,
@@ -1068,12 +1074,13 @@ const App: React.FC = () => {
     for (const invItem of updatedInventory) {
         const returnData = returnQuantities[invItem.id];
         if (returnData) {
+             const newTotalQuantity = invItem.totalQuantity - returnData.missing;
              const newItemState = {
                 ...invItem,
-                availableQuantity: invItem.availableQuantity + returnData.good,
+                availableQuantity: Math.min(invItem.availableQuantity + returnData.good, newTotalQuantity),
                 damagedQuantity: (invItem.damagedQuantity || 0) + returnData.damaged,
                 missingQuantity: (invItem.missingQuantity || 0) + returnData.missing,
-                totalQuantity: invItem.totalQuantity - returnData.missing
+                totalQuantity: newTotalQuantity
             };
             await updateInventoryItem(newItemState);
             Object.assign(invItem, newItemState);
@@ -1271,7 +1278,7 @@ const App: React.FC = () => {
       onClick={() => { setView(id); setIsSidebarOpen(false); }}
       className={`flex items-center space-x-3 w-full p-3 rounded-xl transition-all duration-200 ${
         view === id 
-          ? 'bg-blue-600 text-white shadow-[0_0_20px_rgba(37,99,235,0.3)]' 
+          ? 'bg-white text-black shadow-[0_0_20px_rgba(255,255,255,0.2)]' 
           : 'text-neutral-400 hover:text-neutral-100 hover:bg-neutral-800/50'
       }`}
     >
@@ -1317,7 +1324,7 @@ const App: React.FC = () => {
   if (loading) {
       return (
           <div className="min-h-screen bg-black flex items-center justify-center flex-col">
-              <Loader2 className="animate-spin text-blue-500 mb-4" size={48} />
+              <Loader2 className="animate-spin text-white mb-4" size={48} />
               <h2 className="text-white font-bold text-lg">Loading O-Baja System...</h2>
               <p className="text-neutral-500 text-sm mt-2">Connecting to Firestore Database</p>
           </div>
@@ -1326,11 +1333,11 @@ const App: React.FC = () => {
 
   return (
     <>
-      <div className="flex h-[100dvh] overflow-hidden bg-black text-neutral-100 selection:bg-blue-500/30 print:hidden">
+      <div className="flex h-[100dvh] overflow-hidden bg-black text-neutral-100 selection:bg-white/30 print:hidden">
       {/* Mobile Backdrop */}
       {isSidebarOpen && (
         <div 
-          className="fixed inset-0 bg-black/80 backdrop-blur-sm z-40 lg:hidden"
+          className="fixed inset-0 bg-gray-900/60 backdrop-blur-sm z-40 lg:hidden"
           onClick={() => setIsSidebarOpen(false)}
         />
       )}
@@ -1342,14 +1349,15 @@ const App: React.FC = () => {
       `}>
         <div className="flex flex-col h-full p-6">
           <div className="flex items-center space-x-3 mb-10 px-2">
-            <div className="bg-blue-600 p-2 rounded-lg text-white shadow-lg shadow-blue-600/20">
+            <div className="bg-white p-2 rounded-lg text-black shadow-lg shadow-white/10">
               <Package size={22} />
             </div>
-            <h1 className="text-xl font-bold tracking-tighter text-white">O-BAJA<span className="text-blue-500">SYSTEM</span></h1>
+            <h1 className="text-xl font-bold tracking-tighter text-white">O-BAJA<span className="text-white">SYSTEM</span></h1>
           </div>
           
           <nav className="space-y-1.5 flex-1 overflow-y-auto">
             <NavItem id="dashboard" icon={LayoutDashboard} label="Fleet Overview" />
+            <NavItem id="finance" icon={Wallet} label="Financial Cashflow" />
             <NavItem id="inventory" icon={Package} label="Equipment Fleet" />
             <NavItem id="rentals" icon={History} label="Rental History" />
             <NavItem id="customers" icon={Users} label="Client Directory" />
@@ -1407,12 +1415,14 @@ const App: React.FC = () => {
                     <h2 className="text-xs md:text-sm font-medium text-neutral-500 uppercase tracking-widest mb-0.5">
                       {view === 'customers' ? 'CUSTOMERS' : 
                        view === 'dashboard' ? 'Real-time Stats' : 
+                       view === 'finance' ? 'FINANCE' :
                        view === 'inventory' ? 'INVENTORY' :
                        view === 'maintenance' ? 'Fleet Health' :
                        view === 'losses' ? 'Asset Tracking' : view}
                     </h2>
                     <h3 className="text-lg md:text-xl font-bold text-white capitalize truncate max-w-[150px] md:max-w-none">
                       {view === 'customers' ? 'Customers' : view === 'dashboard' ? 'Fleet Dashboard' : 
+                      view === 'finance' ? 'Financial Cashflow' :
                       view === 'purchasing' ? 'Purchase History' : 
                       view === 'maintenance' ? 'Repair Center' :
                       view === 'losses' ? 'Missing Items Log' : view}
@@ -1430,7 +1440,7 @@ const App: React.FC = () => {
                     <input 
                       type="text" 
                       placeholder="Find anything..." 
-                      className="pl-10 pr-4 py-2.5 bg-neutral-900 border border-neutral-800 rounded-xl text-sm text-neutral-100 placeholder:text-neutral-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 transition-all w-48 lg:w-72"
+                      className="pl-10 pr-4 py-2.5 bg-neutral-900 border border-neutral-800 rounded-xl text-sm text-neutral-100 placeholder:text-neutral-600 focus:outline-none focus:ring-2 focus:ring-gray-500/50 focus:border-gray-500 transition-all w-48 lg:w-72"
                       value={searchTerm}
                       onChange={(e) => setSearchTerm(e.target.value)}
                     />
@@ -1452,7 +1462,7 @@ const App: React.FC = () => {
                       <div className="absolute right-0 top-full mt-2 w-80 bg-[#0a0a0a] border border-neutral-800 rounded-2xl shadow-2xl z-50 overflow-hidden ring-1 ring-white/5">
                           <div className="p-4 border-b border-neutral-800 flex justify-between items-center bg-neutral-900/50">
                               <h4 className="text-sm font-bold text-white">Notifications</h4>
-                              <span className="text-[10px] bg-blue-500/10 text-blue-400 px-2 py-0.5 rounded-full font-bold">{alerts.length} New</span>
+                              <span className="text-[10px] bg-white/10 text-white px-2 py-0.5 rounded-full font-bold">{alerts.length} New</span>
                           </div>
                           <div className="max-h-[320px] overflow-y-auto custom-scrollbar">
                               {alerts.length === 0 ? (
@@ -1473,7 +1483,7 @@ const App: React.FC = () => {
                                                           setSearchTerm(alert.rentalId);
                                                           setIsNotificationsOpen(false);
                                                         }}
-                                                        className="text-[9px] font-bold text-blue-500 hover:text-blue-400 uppercase tracking-wider"
+                                                        className="text-[9px] font-bold text-white hover:text-gray-200 uppercase tracking-wider"
                                                       >
                                                         View
                                                       </button>
@@ -1504,7 +1514,7 @@ const App: React.FC = () => {
                       <select 
                         value={paymentStatusFilter}
                         onChange={(e) => setPaymentStatusFilter(e.target.value as 'All' | 'Paid' | 'Pending')}
-                        className="pl-10 pr-10 py-2.5 bg-neutral-900 border border-neutral-800 rounded-xl text-sm text-neutral-100 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 transition-all appearance-none cursor-pointer font-medium"
+                        className="pl-10 pr-10 py-2.5 bg-neutral-900 border border-neutral-800 rounded-xl text-sm text-neutral-100 focus:outline-none focus:ring-2 focus:ring-gray-500/50 focus:border-gray-500 transition-all appearance-none cursor-pointer font-medium"
                       >
                         <option value="All">All Status</option>
                         <option value="Paid">Paid</option>
@@ -1526,7 +1536,7 @@ const App: React.FC = () => {
                   ) : view === 'customers' ? (
                     <button 
                       onClick={handleOpenAddCustomer}
-                      className="bg-blue-600 hover:bg-blue-500 text-white px-3 md:px-5 py-2.5 rounded-xl text-sm font-bold flex items-center shadow-lg shadow-blue-900/20 transition-all active:scale-95"
+                      className="bg-white hover:bg-gray-200 text-black px-3 md:px-5 py-2.5 rounded-xl text-sm font-bold flex items-center shadow-lg shadow-white/10 transition-all active:scale-95"
                     >
                       <Plus size={18} className="md:mr-2" /> <span className="hidden md:inline">ADD CLIENT</span>
                     </button>
@@ -1534,13 +1544,13 @@ const App: React.FC = () => {
                     <div className="flex items-center space-x-3">
                       <button 
                         onClick={handleOpenQuotationModal}
-                        className="bg-neutral-800 hover:bg-neutral-700 text-neutral-300 border border-neutral-700 px-3 md:px-5 py-2.5 rounded-xl text-sm font-bold flex items-center transition-all active:scale-95"
+                        className="bg-transparent border border-gray-600 text-white hover:bg-gray-800 px-3 md:px-5 py-2.5 rounded-xl text-sm font-bold flex items-center transition-all active:scale-95"
                       >
                         <FileText size={18} className="md:mr-2" /> <span className="hidden md:inline">CREATE QUOTATION</span>
                       </button>
                       <button 
                         onClick={handleOpenRentalModal}
-                        className="bg-blue-600 hover:bg-blue-500 text-white px-3 md:px-5 py-2.5 rounded-xl text-sm font-bold flex items-center shadow-lg shadow-blue-900/20 transition-all active:scale-95"
+                        className="bg-white hover:bg-gray-200 text-black px-3 md:px-5 py-2.5 rounded-xl text-sm font-bold flex items-center shadow-lg shadow-white/10 transition-all active:scale-95"
                       >
                         <Plus size={18} className="md:mr-2" /> <span className="hidden md:inline">NEW RENTAL</span>
                       </button>
@@ -1558,7 +1568,7 @@ const App: React.FC = () => {
                         });
                         setIsNewItemModalOpen(true);
                       }}
-                      className="bg-blue-600 hover:bg-blue-500 text-white px-3 md:px-5 py-2.5 rounded-xl text-sm font-bold flex items-center shadow-lg shadow-blue-900/20 transition-all active:scale-95"
+                      className="bg-white hover:bg-gray-200 text-black px-3 md:px-5 py-2.5 rounded-xl text-sm font-bold flex items-center shadow-lg shadow-white/10 transition-all active:scale-95"
                     >
                       <Plus size={18} className="md:mr-2" /> <span className="hidden md:inline">ADD EQUIPMENT</span>
                     </button>
@@ -1624,10 +1634,10 @@ const App: React.FC = () => {
                 </div>
               )}
 
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                 {[
                   { label: 'Total Fleet Investment', value: formatCurrency(stats.totalProcurement), icon: Wallet, color: 'text-emerald-400', bg: 'bg-emerald-500/10', onClick: () => setView('purchasing') },
-                  { label: 'Projected Revenue', value: formatCurrency(stats.totalRevenue), icon: TrendingUp, color: 'text-blue-400', bg: 'bg-blue-500/10', onClick: () => setView('rentals') },
+                  { label: 'Current Available Cash', value: formatCurrency(stats.totalRevenue), icon: TrendingUp, color: 'text-gray-300', bg: 'bg-white/10', onClick: () => setView('finance') },
                   { label: 'Total Clients', value: stats.totalCustomers, icon: Users, color: 'text-violet-400', bg: 'bg-violet-500/10', onClick: () => setView('customers') },
                   { label: 'Critical Stock', value: stats.lowStockItems, icon: AlertTriangle, color: 'text-orange-400', bg: 'bg-orange-500/10', onClick: () => setView('inventory') },
                   { label: 'Damaged Items', value: totalDamagedItems, icon: Hammer, color: 'text-rose-400', bg: 'bg-rose-500/10', onClick: () => setView('maintenance') },
@@ -1636,17 +1646,17 @@ const App: React.FC = () => {
                   <div 
                     key={i} 
                     onClick={stat.onClick}
-                    className="bg-[#0a0a0a] p-6 rounded-3xl border border-neutral-800/50 shadow-sm hover:border-neutral-700 transition-all duration-200 cursor-pointer hover:-translate-y-1 hover:shadow-lg hover:bg-neutral-900/50"
+                    className={`bg-[#0a0a0a] p-6 rounded-3xl border border-neutral-800/50 shadow-sm hover:border-neutral-700 transition-all duration-300 cursor-pointer hover:-translate-y-1 hover:shadow-lg hover:shadow-white/10 flex flex-col min-w-0`}
                   >
                     <div className="flex items-center justify-between mb-4">
-                      <div className={`${stat.bg} ${stat.color} p-3 rounded-2xl`}>
+                      <div className={`${stat.bg} ${stat.color} p-3 rounded-2xl shrink-0`}>
                         <stat.icon size={22} />
                       </div>
-                      <span className="text-[10px] font-bold text-neutral-500 uppercase tracking-tighter">Current Status</span>
+                      <span className="text-[10px] font-bold text-neutral-500 uppercase tracking-tighter shrink-0 ml-2">Current Status</span>
                     </div>
-                    <div>
-                      <p className="text-sm font-medium text-neutral-500 mb-1">{stat.label}</p>
-                      <p className="text-2xl font-bold text-white tracking-tight">{stat.value}</p>
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-neutral-500 mb-1 truncate">{stat.label}</p>
+                      <p className="text-2xl font-bold text-white tracking-tight whitespace-nowrap overflow-hidden text-ellipsis">{stat.value}</p>
                     </div>
                   </div>
                 ))}
@@ -1662,7 +1672,7 @@ const App: React.FC = () => {
                     </div>
                     <div className="flex gap-3 text-[10px] font-medium uppercase tracking-wider">
                       <div className="flex items-center gap-1.5"><div className="w-2 h-2 rounded-full bg-emerald-500"></div>Avail</div>
-                      <div className="flex items-center gap-1.5"><div className="w-2 h-2 rounded-full bg-blue-500"></div>Rent</div>
+                      <div className="flex items-center gap-1.5"><div className="w-2 h-2 rounded-full bg-white"></div>Rent</div>
                       <div className="flex items-center gap-1.5"><div className="w-2 h-2 rounded-full bg-rose-500"></div>Dmg</div>
                     </div>
                   </div>
@@ -1693,14 +1703,14 @@ const App: React.FC = () => {
                             {/* Progress Bar */}
                             <div className="h-2.5 w-full bg-neutral-900 rounded-full overflow-hidden flex border border-neutral-800/50">
                                {pAvail > 0 && <div style={{ width: `${pAvail}%` }} className="bg-emerald-500/60 group-hover:bg-emerald-500 transition-colors"></div>}
-                               {pRent > 0 && <div style={{ width: `${pRent}%` }} className="bg-blue-500/60 group-hover:bg-blue-500 transition-colors"></div>}
+                               {pRent > 0 && <div style={{ width: `${pRent}%` }} className="bg-white/60 group-hover:bg-white transition-colors"></div>}
                                {pDmg > 0 && <div style={{ width: `${pDmg}%` }} className="bg-rose-500/60 group-hover:bg-rose-500 transition-colors"></div>}
                             </div>
                             
                             {/* Stats Legend */}
                             <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-[10px] font-medium text-neutral-500 uppercase tracking-wide">
                                {item.availableQuantity > 0 && <span className="text-emerald-500/80">{item.availableQuantity} Available</span>}
-                               {rented > 0 && <span className="text-blue-500/80">{rented} Rented</span>}
+                               {rented > 0 && <span className="text-white/80">{rented} Rented</span>}
                                {item.damagedQuantity > 0 && <span className="text-rose-500/80">{item.damagedQuantity} Damaged</span>}
                                {item.missingQuantity > 0 && <span className="text-orange-500/80 ml-auto">{item.missingQuantity} Lost (Lifetime)</span>}
                             </div>
@@ -1714,21 +1724,21 @@ const App: React.FC = () => {
                   {/* Recent Rentals Column (Redirects) */}
                   <div className="bg-[#0a0a0a] p-6 rounded-3xl border border-neutral-800/50 h-[380px] flex flex-col">
                     <h3 className="text-lg font-bold text-white mb-4 flex items-center">
-                      <History size={20} className="mr-2 text-blue-500" /> Recent Activity
+                      <History size={20} className="mr-2 text-white" /> Recent Activity
                     </h3>
                     <div className="flex-1 overflow-y-auto space-y-3 pr-2 touch-pan-y">
                        {recentRentals.length > 0 ? (
                          recentRentals.map(rental => {
                            const customer = customers.find(c => c.id === rental.customerId);
                            return (
-                             <div key={rental.id} className="bg-neutral-900/40 p-3 rounded-xl border border-neutral-800 hover:border-blue-500/30 transition-all group">
+                             <div key={rental.id} className="bg-neutral-900/40 p-3 rounded-xl border border-neutral-800 hover:border-white/30 transition-all group">
                                 <div className="flex justify-between items-start mb-2">
                                    <div>
                                       <p className="text-xs font-bold text-white mb-0.5">{customer?.name || 'Unknown'}</p>
                                       <p className="text-[10px] text-neutral-500 font-mono">#{rental.id.slice(0,8).toUpperCase()}</p>
                                    </div>
                                    <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${
-                                       rental.status === RentalStatus.ACTIVE ? 'bg-blue-500/10 text-blue-400' :
+                                       rental.status === RentalStatus.ACTIVE ? 'bg-white/10 text-white' :
                                        rental.status === RentalStatus.OVERDUE ? 'bg-rose-500/10 text-rose-400' :
                                        'bg-emerald-500/10 text-emerald-400'
                                    }`}>
@@ -1742,7 +1752,7 @@ const App: React.FC = () => {
                                          setView('rentals');
                                          setSearchTerm(rental.id);
                                       }}
-                                      className="flex items-center text-[10px] font-bold text-blue-500 hover:text-blue-400 bg-blue-500/10 px-2 py-1 rounded transition-colors"
+                                      className="flex items-center text-[10px] font-bold text-white hover:text-gray-200 bg-white/10 px-2 py-1 rounded transition-colors"
                                    >
                                       VIEW <ArrowRight size={10} className="ml-1" />
                                    </button>
@@ -1836,13 +1846,13 @@ const App: React.FC = () => {
                                 </div>
                                 <div className="text-right">
                                      <p className="text-[10px] font-bold text-neutral-500 uppercase tracking-widest mb-1">Rate</p>
-                                     <p className="text-base font-bold text-blue-400">{formatCurrency(item.unitPrice)}</p>
+                                     <p className="text-base font-bold text-gray-300">{formatCurrency(item.unitPrice)}</p>
                                 </div>
                             </div>
                             <div className="grid grid-cols-3 gap-3 mt-5 pt-4 border-t border-neutral-800/50">
                                  <button 
                                     onClick={() => handleOpenEditItem(item)}
-                                    className="flex items-center justify-center py-2 rounded-lg bg-neutral-800/50 text-neutral-400 text-xs font-bold hover:bg-blue-500/10 hover:text-blue-400 transition-colors"
+                                    className="flex items-center justify-center py-2 rounded-lg bg-neutral-800/50 text-neutral-400 text-xs font-bold hover:bg-white/10 hover:text-gray-300 transition-colors"
                                  >
                                     <Pencil size={14} className="mr-2" /> Edit
                                  </button>
@@ -1892,9 +1902,9 @@ const App: React.FC = () => {
                         ).map((item) => {
                           const stockPercent = item.totalQuantity > 0 ? (item.availableQuantity / item.totalQuantity) * 100 : 0;
                           return (
-                            <tr key={item.id} className="hover:bg-neutral-800/30 transition-all group cursor-default">
+                            <tr key={item.id} className="hover:bg-gray-800/50 transition-all group cursor-default">
                               <td className="px-8 py-6 whitespace-nowrap">
-                                <p className="font-bold text-white group-hover:text-blue-400 transition-colors mb-0.5">{item.name}</p>
+                                <p className="font-bold text-white group-hover:text-gray-300 transition-colors mb-0.5">{item.name}</p>
                                 <p className="text-[10px] text-neutral-500 flex items-center">
                                   ID: {item.id} <span className="mx-2">•</span> Maint: {item.lastMaintenance}
                                 </p>
@@ -1913,7 +1923,7 @@ const App: React.FC = () => {
                               </td>
                               <td className="px-8 py-6 whitespace-nowrap">
                                 <div className="flex flex-col">
-                                  <span className="text-sm font-black text-blue-400">{formatCurrency(item.unitPrice)} <span className="text-[10px] text-neutral-500 font-normal">/day</span></span>
+                                  <span className="text-sm font-black text-gray-300">{formatCurrency(item.unitPrice)} <span className="text-[10px] text-neutral-500 font-normal">/day</span></span>
                                   <span className="text-xs font-bold text-neutral-500">{formatCurrency(item.monthlyPrice)} <span className="text-[9px] font-normal">/mo</span></span>
                                 </div>
                               </td>
@@ -1938,7 +1948,7 @@ const App: React.FC = () => {
                                 <div className="flex items-center space-x-2">
                                   <button 
                                     onClick={() => handleOpenEditItem(item)}
-                                    className="p-2 text-neutral-500 hover:text-blue-400 hover:bg-blue-500/10 rounded-lg transition-all"
+                                    className="p-2 text-neutral-500 hover:text-white hover:bg-white/10 rounded-lg transition-all"
                                     title="Edit Details"
                                   >
                                       <Pencil size={16} />
@@ -2014,7 +2024,7 @@ const App: React.FC = () => {
                               <div className="grid grid-cols-2 gap-3 pt-3 border-t border-neutral-800/50">
                                   <button 
                                       onClick={() => handleOpenMaintenance(item, 'repair')}
-                                      className="flex items-center justify-center py-2.5 rounded-xl bg-blue-600/10 text-blue-400 border border-blue-600/20 text-xs font-bold hover:bg-blue-600 hover:text-white transition-all"
+                                      className="flex items-center justify-center py-2.5 rounded-xl bg-white/10 text-gray-300 border border-white/20 text-xs font-bold hover:bg-white hover:text-black transition-all"
                                   >
                                       <Wrench size={14} className="mr-2" /> Repair
                                   </button>
@@ -2059,7 +2069,7 @@ const App: React.FC = () => {
                           (item.name.toLowerCase().includes(searchTerm.toLowerCase()))
                         ).map((item) => {
                           return (
-                            <tr key={item.id} className="hover:bg-neutral-800/30 transition-all group">
+                            <tr key={item.id} className="hover:bg-gray-800/50 transition-all group">
                               <td className="px-8 py-6">
                                 <div className="flex items-center space-x-3">
                                     <div className="p-2 bg-rose-500/10 rounded-lg text-rose-500">
@@ -2084,7 +2094,7 @@ const App: React.FC = () => {
                                 <div className="flex items-center justify-end space-x-3">
                                     <button 
                                         onClick={() => handleOpenMaintenance(item, 'repair')}
-                                        className="px-4 py-2 bg-blue-600/10 text-blue-400 border border-blue-600/20 hover:bg-blue-600 hover:text-white rounded-xl text-xs font-bold transition-all flex items-center"
+                                        className="px-4 py-2 bg-white/10 text-gray-300 border border-white/20 hover:bg-white hover:text-black rounded-xl text-xs font-bold transition-all flex items-center"
                                     >
                                         <Wrench size={14} className="mr-2" /> Repair
                                     </button>
@@ -2183,7 +2193,7 @@ const App: React.FC = () => {
                       (item.name.toLowerCase().includes(searchTerm.toLowerCase()))
                     ).map((item) => {
                       return (
-                        <tr key={item.id} className="hover:bg-neutral-800/30 transition-all group">
+                        <tr key={item.id} className="hover:bg-gray-800/50 transition-all group">
                           <td className="px-8 py-6">
                              <div className="flex items-center space-x-3">
                                 <div className="p-2 bg-neutral-700/30 rounded-lg text-neutral-400">
@@ -2294,7 +2304,7 @@ const App: React.FC = () => {
                               <div className="mt-3 pt-3 border-t border-neutral-800/50 flex justify-between items-center">
                                  <span className="text-[10px] font-mono text-neutral-600">{firstItem.purchaseDate}</span>
                                  {isBulkGroup && (
-                                    <span className="text-[10px] font-bold text-blue-400 flex items-center">
+                                    <span className="text-[10px] font-bold text-gray-300 flex items-center">
                                        {isExpanded ? 'Hide Details' : 'View Items'} <ChevronDown size={12} className={`ml-1 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
                                     </span>
                                  )}
@@ -2394,7 +2404,7 @@ const App: React.FC = () => {
                             <React.Fragment key={baseId}>
                               <tr 
                                 onClick={() => isBulkGroup && toggleGroup(baseId)}
-                                className={`transition-all group ${isBulkGroup ? 'cursor-pointer hover:bg-neutral-800/50' : 'hover:bg-neutral-800/30'}`}
+                                className={`transition-all group ${isBulkGroup ? 'cursor-pointer hover:bg-neutral-800/50' : 'hover:bg-gray-800/50'}`}
                               >
                                 <td className="px-8 py-6 w-52 whitespace-nowrap">
                                   <div className="flex items-center space-x-3">
@@ -2411,14 +2421,14 @@ const App: React.FC = () => {
                                 <td className="px-8 py-6 whitespace-nowrap">
                                   {isBulkGroup ? (
                                      <div>
-                                       <p className="font-bold text-white group-hover:text-blue-400 transition-colors text-lg leading-tight">
+                                       <p className="font-bold text-white group-hover:text-gray-300 transition-colors text-lg leading-tight">
                                          Bulk Order <span className="text-neutral-500 text-sm font-normal">({distinctItemsCount} Items)</span>
                                        </p>
                                        <p className="text-[10px] text-neutral-500 font-medium">Mixed Categories</p>
                                      </div>
                                   ) : (
                                     <div>
-                                      <p className="font-bold text-white group-hover:text-blue-400 transition-colors text-lg leading-tight">{itemDetails?.name || 'Unknown'}</p>
+                                      <p className="font-bold text-white group-hover:text-gray-300 transition-colors text-lg leading-tight">{itemDetails?.name || 'Unknown'}</p>
                                       <p className="text-[10px] text-neutral-500 font-medium">{itemDetails?.category}</p>
                                     </div>
                                   )}
@@ -2472,7 +2482,7 @@ const App: React.FC = () => {
                               {isBulkGroup && isExpanded && (isNewBulkGroup ? firstItem.items!.map((p, idx) => {
                                 const subItem = inventory.find(i => i.id === p.itemId);
                                 return (
-                                  <tr key={idx} className="bg-neutral-900/30 hover:bg-neutral-900/50 transition-colors">
+                                  <tr key={idx} className="bg-neutral-900/30 hover:bg-gray-800/50 transition-colors">
                                     <td className="px-8 py-4 relative">
                                        <div className="absolute left-12 top-0 bottom-1/2 w-4 border-l border-b border-neutral-700/50 rounded-bl-xl" />
                                     </td>
@@ -2502,7 +2512,7 @@ const App: React.FC = () => {
                               }) : group.map((purchase, idx) => {
                                 const subItem = inventory.find(i => i.id === purchase.itemId);
                                 return (
-                                  <tr key={purchase.id} className="bg-neutral-900/30 hover:bg-neutral-900/50 transition-colors">
+                                  <tr key={purchase.id} className="bg-neutral-900/30 hover:bg-gray-800/50 transition-colors">
                                     <td className="px-8 py-4 relative">
                                        <div className="absolute left-12 top-0 bottom-1/2 w-4 border-l border-b border-neutral-700/50 rounded-bl-xl" />
                                     </td>
@@ -2604,7 +2614,7 @@ const App: React.FC = () => {
                                     <div className="flex items-center justify-between p-3 bg-neutral-900/50 rounded-xl mb-4 border border-neutral-800/50">
                                         <div className="text-center">
                                             <p className="text-[10px] text-neutral-500 uppercase font-bold tracking-wider">Ongoing</p>
-                                            <p className={`text-lg font-black ${totalOngoing > 0 ? 'text-blue-500' : 'text-neutral-400'}`}>{totalOngoing}</p>
+                                            <p className={`text-lg font-black ${totalOngoing > 0 ? 'text-white' : 'text-neutral-400'}`}>{totalOngoing}</p>
                                         </div>
                                         <div className="w-px h-8 bg-neutral-800" />
                                         <div className="text-center">
@@ -2620,7 +2630,7 @@ const App: React.FC = () => {
                                     <div className="grid grid-cols-3 gap-3 pt-4 border-t border-neutral-800/50">
                                         <button 
                                             onClick={() => handleOpenEditCustomer(customer)}
-                                            className="flex items-center justify-center py-2 rounded-lg bg-neutral-800/50 text-neutral-400 text-xs font-bold hover:bg-blue-500/10 hover:text-blue-400 transition-colors"
+                                            className="flex items-center justify-center py-2 rounded-lg bg-neutral-800/50 text-neutral-400 text-xs font-bold hover:bg-white/10 hover:text-gray-300 transition-colors"
                                         >
                                             <Pencil size={14} className="mr-2" /> Edit
                                         </button>
@@ -2645,11 +2655,11 @@ const App: React.FC = () => {
                                                     {customerRentals.slice(0, 5).map(rental => (
                                                         <div key={rental.id} className="bg-neutral-900/50 p-2 rounded-lg flex justify-between items-center text-xs">
                                                             <div>
-                                                                <span className="text-blue-400 font-mono font-bold mr-2">#{rental.id.slice(0,6)}</span>
+                                                                <span className="text-gray-300 font-mono font-bold mr-2">#{rental.id.slice(0,6)}</span>
                                                                 <span className="text-neutral-400">{rental.startDate}</span>
                                                             </div>
                                                             <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${
-                                                                rental.status === RentalStatus.ACTIVE ? 'bg-blue-500/10 text-blue-500' :
+                                                                rental.status === RentalStatus.ACTIVE ? 'bg-white/10 text-white' :
                                                                 rental.status === RentalStatus.OVERDUE ? 'bg-rose-500/10 text-rose-500' :
                                                                 'bg-emerald-500/10 text-emerald-500'
                                                             }`}>
@@ -2708,16 +2718,16 @@ const App: React.FC = () => {
                                       return (
                                         <React.Fragment key={customer.id}>
                                             <tr 
-                                                className={`transition-all group cursor-pointer ${isExpanded ? 'bg-neutral-800/30' : 'hover:bg-neutral-800/20'}`}
+                                                className={`transition-all group cursor-pointer ${isExpanded ? 'bg-neutral-800/30' : 'hover:bg-gray-800/50'}`}
                                                 onClick={() => toggleCustomerExpand(customer.id)}
                                             >
                                                 <td className="px-8 py-6">
                                                     <div className="flex items-center space-x-3">
-                                                         <div className={`text-neutral-500 transition-transform duration-200 ${isExpanded ? 'rotate-90 text-blue-500' : ''}`}>
+                                                         <div className={`text-neutral-500 transition-transform duration-200 ${isExpanded ? 'rotate-90 text-white' : ''}`}>
                                                               <ChevronRight size={14} />
                                                          </div>
                                                          <div>
-                                                            <p className="font-bold text-white group-hover:text-blue-400 transition-colors text-lg">{customer.name}</p>
+                                                            <p className="font-bold text-white group-hover:text-gray-300 transition-colors text-lg">{customer.name}</p>
                                                             <p className="text-sm text-neutral-500 font-medium">{customer.company}</p>
                                                          </div>
                                                     </div>
@@ -2735,7 +2745,7 @@ const App: React.FC = () => {
                                                 <td className="px-8 py-6">
                                                      <div className="flex items-center space-x-3">
                                                           <div className="text-center px-3 border-r border-neutral-700/50">
-                                                              <span className={`text-lg font-black block ${totalOngoing > 0 ? 'text-blue-400' : 'text-neutral-500'}`}>{totalOngoing}</span>
+                                                              <span className={`text-lg font-black block ${totalOngoing > 0 ? 'text-gray-300' : 'text-neutral-500'}`}>{totalOngoing}</span>
                                                               <span className="text-[9px] font-bold text-neutral-500 uppercase">Ongoing</span>
                                                           </div>
                                                           <div className="text-center px-3">
@@ -2757,7 +2767,7 @@ const App: React.FC = () => {
                                                     <div className="flex items-center justify-end space-x-2" onClick={(e) => e.stopPropagation()}>
                                                           <button 
                                                             onClick={() => handleOpenEditCustomer(customer)}
-                                                            className="p-2 text-neutral-500 hover:text-blue-400 hover:bg-blue-500/10 rounded-lg transition-all"
+                                                            className="p-2 text-neutral-500 hover:text-white hover:bg-white/10 rounded-lg transition-all"
                                                             title="Edit Details"
                                                           >
                                                             <Pencil size={18} />
@@ -2779,7 +2789,7 @@ const App: React.FC = () => {
                                                              <div className="bg-neutral-900/50 rounded-xl border border-neutral-800 overflow-hidden">
                                                                  <div className="px-4 py-3 bg-neutral-800/50 border-b border-neutral-800 flex justify-between items-center">
                                                                      <h4 className="text-xs font-bold text-white uppercase tracking-wider flex items-center">
-                                                                         <History size={14} className="mr-2 text-blue-500" /> Detailed Rental History
+                                                                         <History size={14} className="mr-2 text-white" /> Detailed Rental History
                                                                      </h4>
                                                                      <span className="text-[10px] text-neutral-500">{customerRentals.length} Records found</span>
                                                                  </div>
@@ -2798,15 +2808,15 @@ const App: React.FC = () => {
                                                                              {customerRentals.map(rental => {
                                                                                  const totalItems = rental.items.reduce((acc, i) => acc + i.quantity, 0);
                                                                                  return (
-                                                                                     <tr key={rental.id} className="hover:bg-neutral-800/30">
-                                                                                         <td className="px-4 py-3 text-xs font-mono text-blue-400">#{rental.id.slice(0,8).toUpperCase()}...</td>
+                                                                                     <tr key={rental.id} className="hover:bg-gray-800/50">
+                                                                                         <td className="px-4 py-3 text-xs font-mono text-gray-300">#{rental.id.slice(0,8).toUpperCase()}...</td>
                                                                                          <td className="px-4 py-3 text-xs text-neutral-400">
                                                                                              {rental.startDate} <span className="text-neutral-600 px-1">→</span> {rental.endDate}
                                                                                          </td>
                                                                                          <td className="px-4 py-3 text-xs text-white">{totalItems} Units</td>
                                                                                          <td className="px-4 py-3">
                                                                                              <span className={`text-[9px] font-bold uppercase px-2 py-0.5 rounded ${
-                                                                                                 rental.status === RentalStatus.ACTIVE ? 'bg-blue-500/10 text-blue-500' :
+                                                                                                 rental.status === RentalStatus.ACTIVE ? 'bg-white/10 text-white' :
                                                                                                  rental.status === RentalStatus.OVERDUE ? 'bg-rose-500/10 text-rose-500' :
                                                                                                  'bg-emerald-500/10 text-emerald-500'
                                                                                              }`}>
@@ -2878,7 +2888,7 @@ const App: React.FC = () => {
                            <div key={rental.id} className="bg-[#0a0a0a] rounded-2xl border border-neutral-800 p-5 shadow-sm relative overflow-hidden" onClick={() => toggleRentalExpand(rental.id)}>
                               {/* Status Stripe */}
                               <div className={`absolute left-0 top-0 bottom-0 w-1 ${
-                                 rental.status === RentalStatus.ACTIVE ? 'bg-blue-500' :
+                                 rental.status === RentalStatus.ACTIVE ? 'bg-white' :
                                  rental.status === RentalStatus.OVERDUE ? 'bg-rose-500' :
                                  'bg-emerald-500'
                               }`} />
@@ -2887,10 +2897,10 @@ const App: React.FC = () => {
                                  <div className="flex justify-between items-start mb-2">
                                     <div>
                                        <h3 className="text-sm font-bold text-white">#{rental.id.slice(0,8).toUpperCase()}</h3>
-                                       <p className="text-xs text-blue-400 font-bold">{customer?.name}</p>
+                                       <p className="text-xs text-gray-300 font-bold">{customer?.name}</p>
                                     </div>
                                     <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase ${
-                                       rental.status === RentalStatus.ACTIVE ? 'bg-blue-500/10 text-blue-400' :
+                                       rental.status === RentalStatus.ACTIVE ? 'bg-white/10 text-white' :
                                        rental.status === RentalStatus.OVERDUE ? 'bg-rose-500/10 text-rose-500' :
                                        'bg-emerald-500/10 text-emerald-500'
                                     }`}>{rental.status}</span>
@@ -2932,7 +2942,7 @@ const App: React.FC = () => {
                                           </button>
                                           <button
                                              onClick={(e) => { e.stopPropagation(); handleReturnClick(rental); }}
-                                             className="px-3 py-2 bg-blue-500/10 hover:bg-blue-500/20 text-blue-500 border border-blue-500/20 rounded-lg"
+                                             className="px-3 py-2 bg-white/10 hover:bg-white/20 text-white border border-white/20 rounded-lg"
                                           >
                                              <RotateCcw size={16} />
                                           </button>
@@ -3025,14 +3035,14 @@ const App: React.FC = () => {
                                >
                                  <td className="px-8 py-6 whitespace-nowrap">
                                    <div className="flex items-center space-x-3">
-                                     <div className={`text-neutral-500 transition-transform duration-200 ${isExpanded ? 'rotate-90 text-blue-500' : ''}`}>
+                                     <div className={`text-neutral-500 transition-transform duration-200 ${isExpanded ? 'rotate-90 text-white' : ''}`}>
                                           <ChevronRight size={14} />
                                      </div>
-                                     <span className="font-mono text-xs text-blue-500/70 font-bold group-hover:text-blue-400">#{rental.id.slice(0,8).toUpperCase()}...</span>
+                                     <span className="font-mono text-xs text-white/70 font-bold group-hover:text-gray-300">#{rental.id.slice(0,8).toUpperCase()}...</span>
                                    </div>
                                  </td>
                                  <td className="px-8 py-6 whitespace-nowrap">
-                                   <p className="font-bold text-white group-hover:text-blue-400 transition-colors">{customer?.name}</p>
+                                   <p className="font-bold text-white group-hover:text-gray-300 transition-colors">{customer?.name}</p>
                                    <p className="text-[10px] text-neutral-500 font-medium">{customer?.company}</p>
                                    {rental.deliveryAddress && (
                                      <div className="text-[10px] text-neutral-500 flex items-center mt-1">
@@ -3049,7 +3059,7 @@ const App: React.FC = () => {
                                  </td>
                                  <td className="px-8 py-6 whitespace-nowrap">
                                    <span className={`px-3 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest border shadow-sm ${
-                                     rental.status === RentalStatus.ACTIVE ? 'bg-blue-500/10 text-blue-400 border-blue-500/20' :
+                                     rental.status === RentalStatus.ACTIVE ? 'bg-white/10 text-white border-white/20' :
                                      rental.status === RentalStatus.RETURNED ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' :
                                      rental.status === RentalStatus.OVERDUE ? 'bg-rose-500/10 text-rose-500 border-rose-500/50 shadow-[0_0_10px_rgba(244,63,94,0.2)]' :
                                      'bg-neutral-700/50 text-neutral-400 border-neutral-700'
@@ -3102,7 +3112,7 @@ const App: React.FC = () => {
                                                 </button>
                                                 <button
                                                     onClick={(e) => { e.stopPropagation(); handleReturnClick(rental); }}
-                                                    className="inline-flex items-center space-x-1.5 text-xs font-bold text-blue-500 hover:text-blue-400 bg-blue-500/10 hover:bg-blue-500/20 px-3 py-2 rounded-xl transition-all border border-blue-500/20"
+                                                    className="inline-flex items-center space-x-1.5 text-xs font-bold text-white hover:text-gray-200 bg-white/10 hover:bg-white/20 px-3 py-2 rounded-xl transition-all border border-white/20"
                                                     title="Process Return"
                                                 >
                                                     <RotateCcw size={14} />
@@ -3129,7 +3139,7 @@ const App: React.FC = () => {
                                                     <div className="flex-1 bg-[#0a0a0a] border border-neutral-800 rounded-2xl overflow-hidden p-6">
                                                         <div className="flex items-center justify-between mb-6">
                                                             <h4 className="text-sm font-bold text-white flex items-center">
-                                                                <Layers size={16} className="mr-2 text-blue-500" /> Equipment Manifest
+                                                                <Layers size={16} className="mr-2 text-white" /> Equipment Manifest
                                                             </h4>
                                                             <div className="text-xs text-neutral-500 font-mono">
                                                                 Duration: {durationDays} Days ({rental.startDate} - {rental.endDate})
@@ -3142,7 +3152,7 @@ const App: React.FC = () => {
                                                                 return (
                                                                     <div key={idx} className="bg-neutral-900/50 border border-neutral-800/50 p-4 rounded-xl flex items-center justify-between group/item hover:border-neutral-700 transition-colors">
                                                                         <div className="flex items-center space-x-3">
-                                                                            <div className="bg-blue-500/10 p-2 rounded-lg text-blue-500 group-hover/item:text-blue-400">
+                                                                            <div className="bg-white/10 p-2 rounded-lg text-white group-hover/item:text-gray-300">
                                                                                 <Package size={16} />
                                                                             </div>
                                                                             <div>
@@ -3212,7 +3222,7 @@ const App: React.FC = () => {
                                                                    <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded ${
                                                                        rental.depositStatus === 'Refunded' ? 'bg-emerald-500/10 text-emerald-400' :
                                                                        rental.depositStatus === 'Withheld' ? 'bg-rose-500/10 text-rose-400' :
-                                                                       rental.depositStatus === 'Partial' ? 'bg-blue-500/10 text-blue-400' :
+                                                                       rental.depositStatus === 'Partial' ? 'bg-white/10 text-white' :
                                                                        'bg-amber-500/10 text-amber-400'
                                                                    }`}>
                                                                      {rental.depositStatus}
@@ -3244,6 +3254,21 @@ const App: React.FC = () => {
                </div>
             </>
           )}
+
+          {view === 'finance' && (
+            <FinanceDashboard 
+              rentals={rentals} 
+              operationalExpenses={operationalExpenses} 
+              customers={customers}
+              onExpenseAdded={(expense) => setOperationalExpenses(prev => [...prev, expense])}
+              onExpenseUpdated={(updatedExpense) => setOperationalExpenses(prev => prev.map(e => e.id === updatedExpense.id ? updatedExpense : e))}
+              onExpenseDeleted={(id) => setOperationalExpenses(prev => prev.filter(e => e.id !== id))}
+              onViewRental={(rentalId) => {
+                setView('rentals');
+                setSearchTerm(rentalId);
+              }}
+            />
+          )}
         </div>
       </main>
 
@@ -3252,6 +3277,7 @@ const App: React.FC = () => {
         <div className="flex items-center justify-between w-full px-1 py-2">
            {[
              { id: 'dashboard', icon: LayoutDashboard, label: 'Overview' },
+             { id: 'finance', icon: Wallet, label: 'Finance' },
              { id: 'inventory', icon: Package, label: 'Fleet' },
              { id: 'rentals', icon: History, label: 'Rentals' },
              { id: 'customers', icon: Users, label: 'Clients' },
@@ -3264,7 +3290,7 @@ const App: React.FC = () => {
                 onClick={() => setView(item.id as ViewType)}
                 className={`flex flex-col items-center justify-center flex-1 min-w-0 py-1.5 px-0.5 rounded-xl transition-all ${
                   view === item.id 
-                    ? 'text-blue-500 bg-blue-500/10' 
+                    ? 'text-white bg-white/10' 
                     : 'text-neutral-500 hover:text-neutral-300'
                 }`}
               >
@@ -3280,8 +3306,8 @@ const App: React.FC = () => {
       {/* Delete Purchase Modal */}
       {isDeletePurchaseModalOpen && purchaseToDelete && (
         <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setIsDeletePurchaseModalOpen(false)} />
-          <div className="relative w-full max-w-sm bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col items-center text-center">
+          <div className="absolute inset-0 bg-gray-900/60 backdrop-blur-sm" onClick={() => setIsDeletePurchaseModalOpen(false)} />
+          <div className="relative w-full max-w-sm bg-[#0a0a0a] border border-gray-700/50 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col items-center text-center">
             <div className="w-16 h-16 bg-rose-500/10 rounded-full flex items-center justify-center mb-6">
               <AlertCircle size={32} className="text-rose-500" />
             </div>
@@ -3298,7 +3324,7 @@ const App: React.FC = () => {
             <div className="flex space-x-3 w-full">
               <button 
                 onClick={() => setIsDeletePurchaseModalOpen(false)}
-                className="flex-1 py-3 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 font-bold text-xs rounded-xl transition-all"
+                className="flex-1 py-3 bg-transparent border border-gray-600 text-white hover:bg-gray-800 font-bold text-xs rounded-xl transition-all"
               >
                 CANCEL
               </button>
@@ -3318,9 +3344,9 @@ const App: React.FC = () => {
       {/* Maintenance Action Modal */}
       {isMaintenanceModalOpen && maintenanceItem && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setIsMaintenanceModalOpen(false)} />
-          <div className="relative w-full max-w-sm bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col items-center">
-             <div className={`w-16 h-16 rounded-full flex items-center justify-center mb-6 ${maintenanceAction === 'repair' ? 'bg-blue-500/10 text-blue-500' : 'bg-rose-500/10 text-rose-500'}`}>
+          <div className="absolute inset-0 bg-gray-900/60 backdrop-blur-sm" onClick={() => setIsMaintenanceModalOpen(false)} />
+          <div className="relative w-full max-w-sm bg-[#0a0a0a] border border-gray-700/50 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col items-center">
+             <div className={`w-16 h-16 rounded-full flex items-center justify-center mb-6 ${maintenanceAction === 'repair' ? 'bg-white/10 text-white' : 'bg-rose-500/10 text-rose-500'}`}>
                 {maintenanceAction === 'repair' ? <Wrench size={32} /> : <Trash2 size={32} />}
              </div>
              
@@ -3342,7 +3368,7 @@ const App: React.FC = () => {
                         type="number" 
                         min="1" 
                         max={maintenanceItem.damagedQuantity}
-                        className="w-full bg-neutral-900 border border-neutral-700 rounded-xl px-4 py-3 text-center text-2xl font-bold text-white focus:ring-2 focus:ring-blue-500 outline-none"
+                        className="w-full bg-neutral-900 border border-neutral-700 rounded-xl px-4 py-3 text-center text-2xl font-bold text-white focus:ring-2 focus:ring-gray-500 outline-none"
                         value={maintenanceQuantity || ''}
                         onChange={(e) => setMaintenanceQuantity(parseInt(e.target.value))}
                     />
@@ -3353,7 +3379,7 @@ const App: React.FC = () => {
                     <button 
                         type="button"
                         onClick={() => setIsMaintenanceModalOpen(false)}
-                        className="flex-1 py-3 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 font-bold text-xs rounded-xl transition-all"
+                        className="flex-1 py-3 bg-transparent border border-gray-600 text-white hover:bg-gray-800 font-bold text-xs rounded-xl transition-all"
                     >
                         CANCEL
                     </button>
@@ -3361,7 +3387,7 @@ const App: React.FC = () => {
                         type="submit"
                         className={`flex-1 py-3 font-bold text-xs rounded-xl shadow-lg transition-all ${
                             maintenanceAction === 'repair' 
-                            ? 'bg-blue-600 hover:bg-blue-500 text-white shadow-blue-900/20' 
+                            ? 'bg-white hover:bg-gray-200 text-black shadow-white/10' 
                             : 'bg-rose-600 hover:bg-rose-500 text-white shadow-rose-900/20'
                         }`}
                     >
@@ -3376,8 +3402,8 @@ const App: React.FC = () => {
       {/* Delete Customer Modal */}
       {isDeleteModalOpen && (
         <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setIsDeleteModalOpen(false)} />
-          <div className="relative w-full max-w-sm bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col items-center text-center">
+          <div className="absolute inset-0 bg-gray-900/60 backdrop-blur-sm" onClick={() => setIsDeleteModalOpen(false)} />
+          <div className="relative w-full max-w-sm bg-[#0a0a0a] border border-gray-700/50 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col items-center text-center">
             <div className="w-16 h-16 bg-rose-500/10 rounded-full flex items-center justify-center mb-6">
               <AlertCircle size={32} className="text-rose-500" />
             </div>
@@ -3388,7 +3414,7 @@ const App: React.FC = () => {
             <div className="flex space-x-3 w-full">
               <button 
                 onClick={() => setIsDeleteModalOpen(false)}
-                className="flex-1 py-3 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 font-bold text-xs rounded-xl transition-all"
+                className="flex-1 py-3 bg-transparent border border-gray-600 text-white hover:bg-gray-800 font-bold text-xs rounded-xl transition-all"
               >
                 CANCEL
               </button>
@@ -3406,8 +3432,8 @@ const App: React.FC = () => {
       {/* Delete Rental Modal */}
       {isDeleteRentalModalOpen && (
         <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setIsDeleteRentalModalOpen(false)} />
-          <div className="relative w-full max-w-sm bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col items-center text-center">
+          <div className="absolute inset-0 bg-gray-900/60 backdrop-blur-sm" onClick={() => setIsDeleteRentalModalOpen(false)} />
+          <div className="relative w-full max-w-sm bg-[#0a0a0a] border border-gray-700/50 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col items-center text-center">
             <div className="w-16 h-16 bg-rose-500/10 rounded-full flex items-center justify-center mb-6">
               <AlertCircle size={32} className="text-rose-500" />
             </div>
@@ -3419,7 +3445,7 @@ const App: React.FC = () => {
             <div className="flex space-x-3 w-full">
               <button 
                 onClick={() => setIsDeleteRentalModalOpen(false)}
-                className="flex-1 py-3 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 font-bold text-xs rounded-xl transition-all"
+                className="flex-1 py-3 bg-transparent border border-gray-600 text-white hover:bg-gray-800 font-bold text-xs rounded-xl transition-all"
               >
                 CANCEL
               </button>
@@ -3437,8 +3463,8 @@ const App: React.FC = () => {
       {/* Delete Inventory Item Modal */}
       {isDeleteInventoryModalOpen && (
         <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setIsDeleteInventoryModalOpen(false)} />
-          <div className="relative w-full max-w-sm bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col items-center text-center">
+          <div className="absolute inset-0 bg-gray-900/60 backdrop-blur-sm" onClick={() => setIsDeleteInventoryModalOpen(false)} />
+          <div className="relative w-full max-w-sm bg-[#0a0a0a] border border-gray-700/50 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col items-center text-center">
             <div className="w-16 h-16 bg-rose-500/10 rounded-full flex items-center justify-center mb-6">
               <AlertCircle size={32} className="text-rose-500" />
             </div>
@@ -3449,7 +3475,7 @@ const App: React.FC = () => {
             <div className="flex space-x-3 w-full">
               <button 
                 onClick={() => setIsDeleteInventoryModalOpen(false)}
-                className="flex-1 py-3 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 font-bold text-xs rounded-xl transition-all"
+                className="flex-1 py-3 bg-transparent border border-gray-600 text-white hover:bg-gray-800 font-bold text-xs rounded-xl transition-all"
               >
                 CANCEL
               </button>
@@ -3467,12 +3493,12 @@ const App: React.FC = () => {
       {/* Item Purchase History Modal */}
       {selectedItemForHistory && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setSelectedItemForHistory(null)} />
-          <div className="relative w-full max-w-4xl bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+          <div className="absolute inset-0 bg-gray-900/60 backdrop-blur-sm" onClick={() => setSelectedItemForHistory(null)} />
+          <div className="relative w-full max-w-4xl bg-[#0a0a0a] border border-gray-700/50 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
             <div className="flex items-center justify-between mb-8">
                 <div>
                   <h2 className="text-xl font-bold flex items-center">
-                      <History size={20} className="mr-2 text-blue-500" /> Purchase Record: {selectedItemForHistory.name}
+                      <History size={20} className="mr-2 text-white" /> Purchase Record: {selectedItemForHistory.name}
                   </h2>
                   <p className="text-xs text-neutral-500 mt-1">Full procurement ledger for this equipment asset.</p>
                 </div>
@@ -3519,7 +3545,7 @@ const App: React.FC = () => {
 
                     return itemPurchases.length > 0 ? (
                       itemPurchases.map(p => (
-                        <tr key={p.id} className="hover:bg-neutral-800/20">
+                        <tr key={p.id} className="hover:bg-gray-800/50">
                           <td className="px-6 py-4 text-sm text-neutral-300 font-bold">{p.supplier}</td>
                           <td className="px-6 py-4 text-sm text-white">{p.quantity} units</td>
                           <td className="px-6 py-4">
@@ -3551,7 +3577,7 @@ const App: React.FC = () => {
               </div>
               <button 
                 onClick={() => setSelectedItemForHistory(null)}
-                className="px-6 py-2.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 font-bold text-xs rounded-xl transition-all"
+                className="px-6 py-2.5 bg-transparent border border-gray-600 text-white hover:bg-gray-800 font-bold text-xs rounded-xl transition-all"
               >
                 CLOSE LEDGER
               </button>
@@ -3563,12 +3589,12 @@ const App: React.FC = () => {
       {/* New Customer Modal */}
       {isCustomerModalOpen && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setIsCustomerModalOpen(false)} />
-          <div className="relative w-full max-w-md bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden">
+          <div className="absolute inset-0 bg-gray-900/60 backdrop-blur-sm" onClick={() => setIsCustomerModalOpen(false)} />
+          <div className="relative w-full max-w-md bg-[#0a0a0a] border border-gray-700/50 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden">
             <div className="flex items-center justify-between mb-8">
               <div>
                 <h2 className="text-xl font-bold flex items-center">
-                  <Users size={20} className="mr-2 text-blue-500" /> {editingCustomerId ? 'Edit Client' : 'New Client'}
+                  <Users size={20} className="mr-2 text-white" /> {editingCustomerId ? 'Edit Client' : 'New Client'}
                 </h2>
                 <p className="text-xs text-neutral-500 mt-1">{editingCustomerId ? 'Update client information.' : 'Add a new partner to your directory.'}</p>
               </div>
@@ -3583,7 +3609,7 @@ const App: React.FC = () => {
                 <input 
                   required
                   type="text"
-                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white"
+                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white"
                   value={newCustomer.name}
                   onChange={(e) => setNewCustomer({...newCustomer, name: e.target.value})}
                   placeholder="e.g. John Smith"
@@ -3594,7 +3620,7 @@ const App: React.FC = () => {
                 <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-2">Company Name <span className="text-neutral-600 font-normal normal-case">(Optional)</span></label>
                 <input 
                   type="text"
-                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white"
+                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white"
                   value={newCustomer.company}
                   onChange={(e) => setNewCustomer({...newCustomer, company: e.target.value})}
                   placeholder="e.g. Acme Construction"
@@ -3605,7 +3631,7 @@ const App: React.FC = () => {
                 <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-2">Email Address <span className="text-neutral-600 font-normal normal-case">(Optional)</span></label>
                 <input 
                   type="email"
-                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white"
+                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white"
                   value={newCustomer.email}
                   onChange={(e) => setNewCustomer({...newCustomer, email: e.target.value})}
                   placeholder="email@company.com"
@@ -3616,7 +3642,7 @@ const App: React.FC = () => {
                 <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-2">Phone Number</label>
                 <input 
                   type="tel"
-                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white"
+                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white"
                   value={newCustomer.phone}
                   onChange={(e) => setNewCustomer({...newCustomer, phone: e.target.value})}
                   placeholder="+62 ..."
@@ -3628,7 +3654,7 @@ const App: React.FC = () => {
                 <textarea 
                   required
                   rows={2}
-                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white"
+                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white"
                   value={newCustomer.address}
                   onChange={(e) => setNewCustomer({...newCustomer, address: e.target.value})}
                   placeholder="Full project site address..."
@@ -3647,7 +3673,7 @@ const App: React.FC = () => {
                 )}
                 <button 
                   type="submit"
-                  className="flex-[4] py-4 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-2xl shadow-lg shadow-blue-900/20 transition-all active:scale-95"
+                  className="flex-[4] py-4 bg-white hover:bg-gray-200 text-black font-bold rounded-2xl shadow-lg shadow-white/10 transition-all active:scale-95"
                 >
                   {editingCustomerId ? 'UPDATE CLIENT' : 'ADD TO DIRECTORY'}
                 </button>
@@ -3660,12 +3686,12 @@ const App: React.FC = () => {
       {/* New Equipment Modal */}
       {isNewItemModalOpen && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setIsNewItemModalOpen(false)} />
-          <div className="relative w-full max-w-md bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden">
+          <div className="absolute inset-0 bg-gray-900/60 backdrop-blur-sm" onClick={() => setIsNewItemModalOpen(false)} />
+          <div className="relative w-full max-w-md bg-[#0a0a0a] border border-gray-700/50 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden">
             <div className="flex items-center justify-between mb-8">
               <div>
                 <h2 className="text-xl font-bold flex items-center">
-                  <Package size={20} className="mr-2 text-blue-500" /> {editingItemId ? 'Edit Equipment Details' : 'New Equipment'}
+                  <Package size={20} className="mr-2 text-white" /> {editingItemId ? 'Edit Equipment Details' : 'New Equipment'}
                 </h2>
                 <p className="text-xs text-neutral-500 mt-1">{editingItemId ? 'Update inventory specifications.' : 'Define new inventory item.'}</p>
               </div>
@@ -3681,7 +3707,7 @@ const App: React.FC = () => {
                 <input 
                   required
                   type="text"
-                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white"
+                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white"
                   value={newItemForm.name}
                   onChange={(e) => setNewItemForm({...newItemForm, name: e.target.value})}
                   placeholder="e.g. Ledger 4.0m"
@@ -3691,7 +3717,7 @@ const App: React.FC = () => {
               <div>
                 <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-2">Category</label>
                 <select 
-                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white appearance-none"
+                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white appearance-none"
                   value={newItemForm.category}
                   onChange={(e) => setNewItemForm({...newItemForm, category: e.target.value as ItemCategory})}
                 >
@@ -3707,7 +3733,7 @@ const App: React.FC = () => {
                   <input 
                     type="number"
                     min="0"
-                    className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white"
+                    className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white"
                     value={newItemForm.unitPrice}
                     onChange={(e) => setNewItemForm({...newItemForm, unitPrice: Number(e.target.value)})}
                     placeholder="IDR 0"
@@ -3718,7 +3744,7 @@ const App: React.FC = () => {
                   <input 
                     type="number"
                     min="0"
-                    className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white"
+                    className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white"
                     value={newItemForm.monthlyPrice}
                     onChange={(e) => setNewItemForm({...newItemForm, monthlyPrice: Number(e.target.value)})}
                     placeholder="IDR 0"
@@ -3733,7 +3759,7 @@ const App: React.FC = () => {
                 <input 
                   type="number"
                   min="0"
-                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white"
+                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white"
                   value={newItemForm.initialStock}
                   onChange={(e) => setNewItemForm({...newItemForm, initialStock: Number(e.target.value)})}
                   placeholder="0"
@@ -3749,7 +3775,7 @@ const App: React.FC = () => {
               <div className="pt-4">
                 <button 
                   type="submit"
-                  className="w-full py-4 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-2xl shadow-lg shadow-blue-900/20 transition-all active:scale-95"
+                  className="w-full py-4 bg-white hover:bg-gray-200 text-black font-bold rounded-2xl shadow-lg shadow-white/10 transition-all active:scale-95"
                 >
                   {editingItemId ? 'UPDATE FLEET' : 'ADD TO FLEET'}
                 </button>
@@ -3762,8 +3788,8 @@ const App: React.FC = () => {
       {/* Resupply Purchase Modal */}
       {isPurchaseModalOpen && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setIsPurchaseModalOpen(false)} />
-          <div className={`relative w-[95%] ${isBulkMode ? 'max-w-5xl' : 'max-w-md'} mx-auto flex flex-col max-h-[90vh] bg-[#0a0a0a] border border-neutral-800 rounded-3xl shadow-2xl overflow-hidden transition-all duration-300`}>
+          <div className="absolute inset-0 bg-gray-900/60 backdrop-blur-sm" onClick={() => setIsPurchaseModalOpen(false)} />
+          <div className={`relative w-[95%] ${isBulkMode ? 'max-w-5xl' : 'max-w-md'} mx-auto flex flex-col max-h-[90vh] bg-[#0a0a0a] border border-gray-700/50 rounded-3xl shadow-2xl overflow-hidden transition-all duration-300`}>
             
             {/* Header (Fixed) */}
             <div className="flex flex-col md:flex-row md:items-center justify-between p-6 md:p-8 pb-4 md:pb-6 border-b border-neutral-800/50 shrink-0 gap-4 md:gap-0">
@@ -3775,7 +3801,7 @@ const App: React.FC = () => {
                 </div>
                 <div className="flex items-center justify-between md:justify-end space-x-4 w-full md:w-auto">
                   <div className="flex items-center space-x-2 bg-neutral-900 px-3 py-1.5 rounded-xl border border-neutral-800">
-                    <span className={`text-[10px] font-black uppercase tracking-widest ${!isBulkMode ? 'text-blue-400' : 'text-neutral-600'}`}>Single</span>
+                    <span className={`text-[10px] font-black uppercase tracking-widest ${!isBulkMode ? 'text-gray-300' : 'text-neutral-600'}`}>Single</span>
                     <button 
                       type="button"
                       onClick={() => setIsBulkMode(!isBulkMode)}
@@ -4064,12 +4090,12 @@ const App: React.FC = () => {
       {/* New Rental Modal */}
       {isRentalModalOpen && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setIsRentalModalOpen(false)} />
-          <div className="relative w-full max-w-2xl bg-[#0a0a0a] border border-neutral-800 rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-in fade-in zoom-in-95 duration-200">
+          <div className="absolute inset-0 bg-gray-900/60 backdrop-blur-sm" onClick={() => setIsRentalModalOpen(false)} />
+          <div className="relative w-full max-w-2xl bg-[#0a0a0a] border border-gray-700/50 rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-in fade-in zoom-in-95 duration-200">
             <div className="flex items-center justify-between px-5 py-4 md:px-8 md:py-6 border-b border-neutral-800 shrink-0 bg-[#0a0a0a] z-10">
                 <div>
                   <h2 className="text-lg md:text-xl font-bold flex items-center text-white">
-                      <FileText size={20} className="mr-2 text-blue-500" /> New Rental Contract
+                      <FileText size={20} className="mr-2 text-white" /> New Rental Contract
                   </h2>
                   <div className="flex items-center mt-1.5 space-x-2">
                     <span className="px-2 py-0.5 rounded bg-neutral-800 text-[10px] font-bold text-neutral-400 uppercase tracking-wider">
@@ -4100,7 +4126,7 @@ const App: React.FC = () => {
                             <button
                                 type="button"
                                 onClick={() => setRentalForm({...rentalForm, rateType: 'Daily'})}
-                                className={`flex-1 py-3 text-xs md:text-sm font-bold rounded-lg transition-all ${rentalForm.rateType === 'Daily' ? 'bg-blue-600 text-white shadow-md' : 'text-neutral-500 hover:text-neutral-300'}`}
+                                className={`flex-1 py-3 text-xs md:text-sm font-bold rounded-lg transition-all ${rentalForm.rateType === 'Daily' ? 'bg-white text-black shadow-md' : 'text-neutral-500 hover:text-neutral-300'}`}
                             >
                                 Daily / Custom
                             </button>
@@ -4116,7 +4142,7 @@ const App: React.FC = () => {
                                         endDate: start.toISOString().split('T')[0]
                                      });
                                 }}
-                                className={`flex-1 py-3 text-xs md:text-sm font-bold rounded-lg transition-all ${rentalForm.rateType === 'Monthly' ? 'bg-blue-600 text-white shadow-md' : 'text-neutral-500 hover:text-neutral-300'}`}
+                                className={`flex-1 py-3 text-xs md:text-sm font-bold rounded-lg transition-all ${rentalForm.rateType === 'Monthly' ? 'bg-white text-black shadow-md' : 'text-neutral-500 hover:text-neutral-300'}`}
                             >
                                 Monthly Fixed
                             </button>
@@ -4127,7 +4153,7 @@ const App: React.FC = () => {
                       <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">Select Client</label>
                       <select 
                         required
-                        className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white appearance-none"
+                        className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white appearance-none"
                         value={rentalForm.customerId}
                         onChange={(e) => {
                           const selectedCId = e.target.value;
@@ -4161,7 +4187,7 @@ const App: React.FC = () => {
                         <input 
                           required
                           type="date"
-                          className="w-full h-12 bg-neutral-900 border border-neutral-800 rounded-xl pl-12 pr-4 py-3 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white appearance-none [color-scheme:dark] text-left"
+                          className="w-full h-12 bg-neutral-900 border border-neutral-800 rounded-xl pl-12 pr-4 py-3 text-base md:text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white appearance-none [color-scheme:dark] text-left"
                           value={rentalForm.startDate}
                           onChange={(e) => {
                                const newStart = e.target.value;
@@ -4190,7 +4216,7 @@ const App: React.FC = () => {
                               <input 
                                   required
                                   type="date"
-                                  className="w-full h-12 bg-neutral-900 border border-neutral-800 rounded-xl pl-12 pr-4 py-3 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white appearance-none [color-scheme:dark] text-left"
+                                  className="w-full h-12 bg-neutral-900 border border-neutral-800 rounded-xl pl-12 pr-4 py-3 text-base md:text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white appearance-none [color-scheme:dark] text-left"
                                   value={rentalForm.endDate}
                                   min={rentalForm.startDate}
                                   onChange={(e) => setRentalForm({ ...rentalForm, endDate: e.target.value })}
@@ -4207,7 +4233,7 @@ const App: React.FC = () => {
                                   type="number"
                                   min="1"
                                   step="0.5"
-                                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl pl-12 pr-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white"
+                                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl pl-12 pr-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white"
                                   value={rentalForm.manualMonths}
                                   onChange={(e) => {
                                       const months = parseFloat(e.target.value) || 0;
@@ -4231,10 +4257,10 @@ const App: React.FC = () => {
                 {rentalStep === 3 && (
                   <div className="space-y-6 animate-in fade-in slide-in-from-right-8 duration-300">
                     {/* Quick Add Set UI */}
-                    <div className="bg-gradient-to-br from-blue-900/20 to-blue-900/5 border border-blue-500/20 rounded-2xl p-4 md:p-5">
+                    <div className="bg-gradient-to-br from-blue-900/20 to-blue-900/5 border border-white/20 rounded-2xl p-4 md:p-5">
                         <div className="flex flex-col gap-4">
                             <div className="flex items-start space-x-4">
-                                <div className="p-3 bg-blue-600 rounded-xl text-white shrink-0 shadow-lg shadow-blue-600/20">
+                                <div className="p-3 bg-white rounded-xl text-black shrink-0 shadow-lg shadow-white/10">
                                     <Layers size={24} />
                                 </div>
                                 <div>
@@ -4259,7 +4285,7 @@ const App: React.FC = () => {
                                 <button 
                                     type="button"
                                     onClick={handleAddSet}
-                                    className="h-10 px-4 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-lg transition-all active:scale-95 flex items-center justify-center shadow-lg text-sm"
+                                    className="h-10 px-4 bg-white hover:bg-gray-200 text-black font-bold rounded-lg transition-all active:scale-95 flex items-center justify-center shadow-lg text-sm"
                                 >
                                     <Plus size={16} className="mr-2" /> Add
                                 </button>
@@ -4289,7 +4315,7 @@ const App: React.FC = () => {
                             : 0;
                         
                         return (
-                            <div key={row.id} className="relative bg-neutral-900/60 p-4 rounded-2xl border border-neutral-800 hover:border-blue-500/30 transition-all group">
+                            <div key={row.id} className="relative bg-neutral-900/60 p-4 rounded-2xl border border-neutral-800 hover:border-white/30 transition-all group">
                                 <button 
                                     type="button"
                                     onClick={() => removeRentalItemRow(row.id)}
@@ -4305,7 +4331,7 @@ const App: React.FC = () => {
                                         <div className="relative">
                                             <select 
                                                 required
-                                                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl pl-3 pr-8 py-3 text-sm focus:ring-1 focus:ring-blue-500 outline-none text-white appearance-none"
+                                                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl pl-3 pr-8 py-3 text-sm focus:ring-1 focus:ring-gray-500 outline-none text-white appearance-none"
                                                 value={row.itemId}
                                                 onChange={(e) => updateRentalItemRow(row.id, 'itemId', e.target.value)}
                                             >
@@ -4331,7 +4357,7 @@ const App: React.FC = () => {
                                                 required
                                                 type="number"
                                                 min="1"
-                                                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-2 py-2.5 text-sm focus:ring-1 focus:ring-blue-500 outline-none text-white font-bold text-center"
+                                                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-2 py-2.5 text-sm focus:ring-1 focus:ring-gray-500 outline-none text-white font-bold text-center"
                                                 value={row.quantity}
                                                 onChange={(e) => updateRentalItemRow(row.id, 'quantity', parseInt(e.target.value) || 0)}
                                             />
@@ -4352,7 +4378,7 @@ const App: React.FC = () => {
                     <button 
                       type="button"
                       onClick={addRentalItemRow}
-                      className="w-full py-3.5 border border-dashed border-neutral-800 rounded-xl flex items-center justify-center text-neutral-500 hover:text-blue-500 hover:border-blue-500/30 hover:bg-blue-500/5 transition-all text-xs font-bold uppercase tracking-widest mt-4 group"
+                      className="w-full py-3.5 border border-dashed border-neutral-800 rounded-xl flex items-center justify-center text-neutral-500 hover:text-white hover:border-white/30 hover:bg-white/5 transition-all text-xs font-bold uppercase tracking-widest mt-4 group"
                     >
                       <Plus size={16} className="mr-2 group-hover:scale-110 transition-transform" /> Add Item
                     </button>
@@ -4367,7 +4393,7 @@ const App: React.FC = () => {
                        <textarea
                           required
                           rows={3}
-                          className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white placeholder-neutral-600"
+                          className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white placeholder-neutral-600"
                           value={rentalForm.deliveryAddress}
                           onChange={(e) => setRentalForm({ ...rentalForm, deliveryAddress: e.target.value })}
                           placeholder="Enter the specific project site address..."
@@ -4396,7 +4422,7 @@ const App: React.FC = () => {
                                <input 
                                     type="number"
                                     min="0"
-                                    className="w-full bg-neutral-900 border border-neutral-700 rounded-xl pl-12 pr-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white placeholder-neutral-600"
+                                    className="w-full bg-neutral-900 border border-neutral-700 rounded-xl pl-12 pr-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white placeholder-neutral-600"
                                     value={rentalForm.deliveryFee}
                                     onChange={(e) => setRentalForm({ ...rentalForm, deliveryFee: parseInt(e.target.value) || 0 })}
                                     placeholder="0"
@@ -4407,7 +4433,7 @@ const App: React.FC = () => {
                            <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">Payment Status</label>
                             <div className="relative">
                                <select
-                                    className="w-full bg-neutral-900 border border-neutral-700 rounded-xl px-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white appearance-none"
+                                    className="w-full bg-neutral-900 border border-neutral-700 rounded-xl px-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white appearance-none"
                                     value={rentalForm.paymentStatus}
                                     onChange={(e) => setRentalForm({ ...rentalForm, paymentStatus: e.target.value as any })}
                                >
@@ -4431,7 +4457,7 @@ const App: React.FC = () => {
                         </div>
                         <div className="flex justify-between items-center pt-4 border-t border-neutral-800 mt-2">
                             <span className="text-sm font-bold text-white">Total Estimated</span>
-                            <span className="text-2xl font-black text-blue-500">{formatCurrency(calculateRentalTotal() + rentalForm.deliveryFee)}</span>
+                            <span className="text-2xl font-black text-white">{formatCurrency(calculateRentalTotal() + rentalForm.deliveryFee)}</span>
                         </div>
                     </div>
                   </div>
@@ -4475,7 +4501,7 @@ const App: React.FC = () => {
                         }
                         setRentalStep(s => s + 1);
                       }}
-                      className="bg-blue-600 hover:bg-blue-500 text-white px-8 py-3.5 rounded-xl font-bold text-sm shadow-lg shadow-blue-600/20 transition-all active:scale-95 flex items-center"
+                      className="bg-white hover:bg-gray-200 text-black px-8 py-3.5 rounded-xl font-bold text-sm shadow-lg shadow-white/10 transition-all active:scale-95 flex items-center"
                     >
                       Next Step <ChevronRight size={18} className="ml-2" />
                     </button>
@@ -4498,12 +4524,12 @@ const App: React.FC = () => {
       {/* Quotation Modal */}
       {isQuotationModalOpen && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setIsQuotationModalOpen(false)} />
-          <div className="relative w-full max-w-2xl bg-[#0a0a0a] border border-neutral-800 rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-in fade-in zoom-in-95 duration-200">
+          <div className="absolute inset-0 bg-gray-900/60 backdrop-blur-sm" onClick={() => setIsQuotationModalOpen(false)} />
+          <div className="relative w-full max-w-2xl bg-[#0a0a0a] border border-gray-700/50 rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-in fade-in zoom-in-95 duration-200">
             <div className="flex items-center justify-between px-5 py-4 md:px-8 md:py-6 border-b border-neutral-800 shrink-0 bg-[#0a0a0a] z-10">
                 <div>
                   <h2 className="text-lg md:text-xl font-bold flex items-center text-white">
-                      <FileText size={20} className="mr-2 text-blue-500" /> Create Quotation
+                      <FileText size={20} className="mr-2 text-white" /> Create Quotation
                   </h2>
                   <div className="flex items-center mt-1.5 space-x-2">
                     <span className="px-2 py-0.5 rounded bg-neutral-800 text-[10px] font-bold text-neutral-400 uppercase tracking-wider">
@@ -4534,7 +4560,7 @@ const App: React.FC = () => {
                             <button
                                 type="button"
                                 onClick={() => setRentalForm({...rentalForm, rateType: 'Daily'})}
-                                className={`flex-1 py-3 text-xs md:text-sm font-bold rounded-lg transition-all ${rentalForm.rateType === 'Daily' ? 'bg-blue-600 text-white shadow-md' : 'text-neutral-500 hover:text-neutral-300'}`}
+                                className={`flex-1 py-3 text-xs md:text-sm font-bold rounded-lg transition-all ${rentalForm.rateType === 'Daily' ? 'bg-white text-black shadow-md' : 'text-neutral-500 hover:text-neutral-300'}`}
                             >
                                 Daily / Custom
                             </button>
@@ -4550,7 +4576,7 @@ const App: React.FC = () => {
                                         endDate: start.toISOString().split('T')[0]
                                      });
                                 }}
-                                className={`flex-1 py-3 text-xs md:text-sm font-bold rounded-lg transition-all ${rentalForm.rateType === 'Monthly' ? 'bg-blue-600 text-white shadow-md' : 'text-neutral-500 hover:text-neutral-300'}`}
+                                className={`flex-1 py-3 text-xs md:text-sm font-bold rounded-lg transition-all ${rentalForm.rateType === 'Monthly' ? 'bg-white text-black shadow-md' : 'text-neutral-500 hover:text-neutral-300'}`}
                             >
                                 Monthly Fixed
                             </button>
@@ -4561,7 +4587,7 @@ const App: React.FC = () => {
                       <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">Select Client</label>
                       <select 
                         required
-                        className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white appearance-none"
+                        className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white appearance-none"
                         value={rentalForm.customerId}
                         onChange={(e) => {
                           const selectedCId = e.target.value;
@@ -4595,7 +4621,7 @@ const App: React.FC = () => {
                         <input 
                           required
                           type="date"
-                          className="w-full h-12 bg-neutral-900 border border-neutral-800 rounded-xl pl-12 pr-4 py-3 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white appearance-none [color-scheme:dark] text-left"
+                          className="w-full h-12 bg-neutral-900 border border-neutral-800 rounded-xl pl-12 pr-4 py-3 text-base md:text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white appearance-none [color-scheme:dark] text-left"
                           value={rentalForm.startDate}
                           onChange={(e) => {
                                const newStart = e.target.value;
@@ -4624,7 +4650,7 @@ const App: React.FC = () => {
                               <input 
                                   required
                                   type="date"
-                                  className="w-full h-12 bg-neutral-900 border border-neutral-800 rounded-xl pl-12 pr-4 py-3 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white appearance-none [color-scheme:dark] text-left"
+                                  className="w-full h-12 bg-neutral-900 border border-neutral-800 rounded-xl pl-12 pr-4 py-3 text-base md:text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white appearance-none [color-scheme:dark] text-left"
                                   value={rentalForm.endDate}
                                   min={rentalForm.startDate}
                                   onChange={(e) => setRentalForm({ ...rentalForm, endDate: e.target.value })}
@@ -4641,7 +4667,7 @@ const App: React.FC = () => {
                                   type="number"
                                   min="1"
                                   step="0.5"
-                                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl pl-12 pr-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white"
+                                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl pl-12 pr-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white"
                                   value={rentalForm.manualMonths}
                                   onChange={(e) => {
                                       const months = parseFloat(e.target.value) || 0;
@@ -4665,10 +4691,10 @@ const App: React.FC = () => {
                 {rentalStep === 3 && (
                   <div className="space-y-6 animate-in fade-in slide-in-from-right-8 duration-300">
                     {/* Quick Add Set UI */}
-                    <div className="bg-gradient-to-br from-blue-900/20 to-blue-900/5 border border-blue-500/20 rounded-2xl p-4 md:p-5">
+                    <div className="bg-gradient-to-br from-blue-900/20 to-blue-900/5 border border-white/20 rounded-2xl p-4 md:p-5">
                         <div className="flex flex-col gap-4">
                             <div className="flex items-start space-x-4">
-                                <div className="p-3 bg-blue-600 rounded-xl text-white shrink-0 shadow-lg shadow-blue-600/20">
+                                <div className="p-3 bg-white rounded-xl text-black shrink-0 shadow-lg shadow-white/10">
                                     <Layers size={24} />
                                 </div>
                                 <div>
@@ -4693,7 +4719,7 @@ const App: React.FC = () => {
                                 <button 
                                     type="button"
                                     onClick={handleAddSet}
-                                    className="h-10 px-4 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-lg transition-all active:scale-95 flex items-center justify-center shadow-lg text-sm"
+                                    className="h-10 px-4 bg-white hover:bg-gray-200 text-black font-bold rounded-lg transition-all active:scale-95 flex items-center justify-center shadow-lg text-sm"
                                 >
                                     <Plus size={16} className="mr-2" /> Add
                                 </button>
@@ -4723,7 +4749,7 @@ const App: React.FC = () => {
                             : 0;
                         
                         return (
-                            <div key={row.id} className="relative bg-neutral-900/60 p-4 rounded-2xl border border-neutral-800 hover:border-blue-500/30 transition-all group">
+                            <div key={row.id} className="relative bg-neutral-900/60 p-4 rounded-2xl border border-neutral-800 hover:border-white/30 transition-all group">
                                 <button 
                                     type="button"
                                     onClick={() => removeRentalItemRow(row.id)}
@@ -4739,7 +4765,7 @@ const App: React.FC = () => {
                                         <div className="relative">
                                             <select 
                                                 required
-                                                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl pl-3 pr-8 py-3 text-sm focus:ring-1 focus:ring-blue-500 outline-none text-white appearance-none"
+                                                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl pl-3 pr-8 py-3 text-sm focus:ring-1 focus:ring-gray-500 outline-none text-white appearance-none"
                                                 value={row.itemId}
                                                 onChange={(e) => updateRentalItemRow(row.id, 'itemId', e.target.value)}
                                             >
@@ -4765,7 +4791,7 @@ const App: React.FC = () => {
                                                 required
                                                 type="number"
                                                 min="1"
-                                                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-2 py-2.5 text-sm focus:ring-1 focus:ring-blue-500 outline-none text-white font-bold text-center"
+                                                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-2 py-2.5 text-sm focus:ring-1 focus:ring-gray-500 outline-none text-white font-bold text-center"
                                                 value={row.quantity}
                                                 onChange={(e) => updateRentalItemRow(row.id, 'quantity', parseInt(e.target.value) || 0)}
                                             />
@@ -4786,7 +4812,7 @@ const App: React.FC = () => {
                     <button 
                       type="button"
                       onClick={addRentalItemRow}
-                      className="w-full py-3.5 border border-dashed border-neutral-800 rounded-xl flex items-center justify-center text-neutral-500 hover:text-blue-500 hover:border-blue-500/30 hover:bg-blue-500/5 transition-all text-xs font-bold uppercase tracking-widest mt-4 group"
+                      className="w-full py-3.5 border border-dashed border-neutral-800 rounded-xl flex items-center justify-center text-neutral-500 hover:text-white hover:border-white/30 hover:bg-white/5 transition-all text-xs font-bold uppercase tracking-widest mt-4 group"
                     >
                       <Plus size={16} className="mr-2 group-hover:scale-110 transition-transform" /> Add Item
                     </button>
@@ -4801,7 +4827,7 @@ const App: React.FC = () => {
                        <textarea
                           required
                           rows={3}
-                          className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white placeholder-neutral-600"
+                          className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white placeholder-neutral-600"
                           value={rentalForm.deliveryAddress}
                           onChange={(e) => setRentalForm({ ...rentalForm, deliveryAddress: e.target.value })}
                           placeholder="Enter the specific project site address..."
@@ -4830,7 +4856,7 @@ const App: React.FC = () => {
                                <input 
                                     type="number"
                                     min="0"
-                                    className="w-full bg-neutral-900 border border-neutral-700 rounded-xl pl-12 pr-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white placeholder-neutral-600"
+                                    className="w-full bg-neutral-900 border border-neutral-700 rounded-xl pl-12 pr-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white placeholder-neutral-600"
                                     value={rentalForm.deliveryFee}
                                     onChange={(e) => setRentalForm({ ...rentalForm, deliveryFee: parseInt(e.target.value) || 0 })}
                                     placeholder="0"
@@ -4850,7 +4876,7 @@ const App: React.FC = () => {
                         </div>
                         <div className="flex justify-between items-center pt-4 border-t border-neutral-800 mt-2">
                             <span className="text-sm font-bold text-white">Total Estimated</span>
-                            <span className="text-2xl font-black text-blue-500">{formatCurrency(calculateRentalTotal() + rentalForm.deliveryFee)}</span>
+                            <span className="text-2xl font-black text-white">{formatCurrency(calculateRentalTotal() + rentalForm.deliveryFee)}</span>
                         </div>
                     </div>
                   </div>
@@ -4894,7 +4920,7 @@ const App: React.FC = () => {
                         }
                         setRentalStep(s => s + 1);
                       }}
-                      className="bg-blue-600 hover:bg-blue-500 text-white px-8 py-3.5 rounded-xl font-bold text-sm shadow-lg shadow-blue-600/20 transition-all active:scale-95 flex items-center"
+                      className="bg-white hover:bg-gray-200 text-black px-8 py-3.5 rounded-xl font-bold text-sm shadow-lg shadow-white/10 transition-all active:scale-95 flex items-center"
                     >
                       Next Step <ChevronRight size={18} className="ml-2" />
                     </button>
@@ -4917,12 +4943,12 @@ const App: React.FC = () => {
       {/* Return Rental Modal */}
       {isReturnModalOpen && rentalToReturn && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setIsReturnModalOpen(false)} />
-          <div className="relative w-full max-w-2xl bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+          <div className="absolute inset-0 bg-gray-900/60 backdrop-blur-sm" onClick={() => setIsReturnModalOpen(false)} />
+          <div className="relative w-full max-w-2xl bg-[#0a0a0a] border border-gray-700/50 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
             <div className="flex items-center justify-between mb-8 shrink-0">
               <div>
                 <h2 className="text-xl font-bold flex items-center">
-                  <RotateCcw size={20} className="mr-2 text-blue-500" /> Return Equipment
+                  <RotateCcw size={20} className="mr-2 text-white" /> Return Equipment
                 </h2>
                 <p className="text-xs text-neutral-500 mt-1">Verify condition and finalize rental costs.</p>
               </div>
@@ -4935,7 +4961,7 @@ const App: React.FC = () => {
                 {/* SECTION 1: INVENTORY TRACKING */}
                 <div className="h-auto flex-shrink-0 space-y-4">
                     <h3 className="text-sm font-bold text-white flex items-center uppercase tracking-widest">
-                        <RotateCcw size={16} className="mr-2 text-blue-500" /> Inventory Tracking
+                        <RotateCcw size={16} className="mr-2 text-white" /> Inventory Tracking
                     </h3>
                     <div className="grid grid-cols-12 gap-2 md:gap-4 px-2 pb-2 border-b border-neutral-800/50 text-[9px] font-black text-neutral-500 uppercase tracking-widest">
                         <div className="col-span-5">Item</div>
@@ -5005,7 +5031,7 @@ const App: React.FC = () => {
                 {/* Projected Inventory Updates */}
                 <div className="bg-neutral-900/30 rounded-xl p-5 border border-neutral-800/50 mt-6 h-auto flex-shrink-0">
                    <h4 className="text-xs font-bold text-white mb-4 flex items-center uppercase tracking-widest">
-                      <TrendingUp size={14} className="mr-2 text-blue-500" /> Projected Inventory Updates
+                      <TrendingUp size={14} className="mr-2 text-white" /> Projected Inventory Updates
                    </h4>
                    <div className="space-y-3">
                       {Object.keys(returnQuantities).map(itemId => {
@@ -5141,7 +5167,7 @@ const App: React.FC = () => {
                 
                 <button 
                     onClick={handleProcessReturn}
-                    className="w-full py-4 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-2xl shadow-lg shadow-blue-900/20 transition-all active:scale-95"
+                    className="w-full py-4 bg-white hover:bg-gray-200 text-black font-bold rounded-2xl shadow-lg shadow-white/10 transition-all active:scale-95"
                 >
                     COMPLETE RETURN & UPDATE INVENTORY
                 </button>
@@ -5154,8 +5180,8 @@ const App: React.FC = () => {
       {/* Extend Rental Modal */}
       {isExtendModalOpen && rentalToExtend && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setIsExtendModalOpen(false)} />
-          <div className="relative w-full max-w-lg bg-[#0a0a0a] border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col">
+          <div className="absolute inset-0 bg-gray-900/60 backdrop-blur-sm" onClick={() => setIsExtendModalOpen(false)} />
+          <div className="relative w-full max-w-lg bg-[#0a0a0a] border border-gray-700/50 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden flex flex-col">
             <div className="flex items-center justify-between mb-8 shrink-0">
               <div>
                 <h2 className="text-xl font-bold flex items-center">
@@ -5173,7 +5199,7 @@ const App: React.FC = () => {
                     <div className="flex justify-between items-center">
                         <div>
                             <div className="text-[10px] font-black text-neutral-500 uppercase tracking-widest">Transaction</div>
-                            <div className="text-sm font-mono font-bold text-blue-400">#{rentalToExtend.id.slice(0,8).toUpperCase()}...</div>
+                            <div className="text-sm font-mono font-bold text-gray-300">#{rentalToExtend.id.slice(0,8).toUpperCase()}...</div>
                         </div>
                         <div className="text-right">
                             <div className="text-[10px] font-black text-neutral-500 uppercase tracking-widest">Current End Date</div>
