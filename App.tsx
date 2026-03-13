@@ -192,7 +192,11 @@ const App: React.FC = () => {
   const toggleRentalExpand = (rentalId: string) => setExpandedRentalId(prev => prev === rentalId ? null : rentalId);
 
   // Set Logic State
-  const [setCount, setSetCount] = useState<number>(1);
+  const [packageCounts, setPackageCounts] = useState<Record<string, number>>({
+    scaffolding_170: 1,
+    roda_set: 1,
+    ladder_frame: 1
+  });
   
   const [singlePurchase, setSinglePurchase] = useState<{
     itemId: string;
@@ -222,6 +226,7 @@ const App: React.FC = () => {
     customerId: string;
     startDate: string;
     endDate: string;
+    actualReturnDate?: string;
     items: RentalItemRow[];
     rateType: 'Daily' | 'Monthly';
     manualMonths: number;
@@ -233,6 +238,7 @@ const App: React.FC = () => {
     customerId: '',
     startDate: new Date().toISOString().split('T')[0],
     endDate: '',
+    actualReturnDate: '',
     items: [{ id: '1', itemId: '', quantity: 1 }],
     rateType: 'Daily',
     manualMonths: 1,
@@ -650,7 +656,6 @@ const App: React.FC = () => {
       deliveryFee: 0,
       paymentStatus: 'Pending'
     });
-    setSetCount(1);
     setRentalStep(1);
     setIsRentalModalOpen(true);
   };
@@ -661,6 +666,7 @@ const App: React.FC = () => {
       customerId: rental.customerId,
       startDate: rental.startDate,
       endDate: rental.endDate,
+      actualReturnDate: rental.actualReturnDate || '',
       items: rental.items.map(item => ({
         id: Math.random().toString(36).substr(2, 9),
         itemId: item.itemId,
@@ -674,7 +680,6 @@ const App: React.FC = () => {
       paymentStatus: rental.paymentStatus || 'Pending'
     });
     setRentalStep(1);
-    setSetCount(1);
     setIsEditRentalModalOpen(true);
   };
 
@@ -692,48 +697,51 @@ const App: React.FC = () => {
     setIsSubmitting(true);
 
     try {
-      // Inventory Math: Calculate delta for each item
-      const oldItems = rentalToEdit.items;
-      const newItems = rentalForm.items;
+      // Inventory Math: Calculate delta for each item ONLY IF NOT RETURNED
+      if (rentalToEdit.status !== RentalStatus.RETURNED) {
+        const oldItems = rentalToEdit.items;
+        const newItems = rentalForm.items;
 
-      const oldQuantities: Record<string, number> = {};
-      oldItems.forEach(item => {
-        oldQuantities[item.itemId] = (oldQuantities[item.itemId] || 0) + item.quantity;
-      });
+        const oldQuantities: Record<string, number> = {};
+        oldItems.forEach(item => {
+          oldQuantities[item.itemId] = (oldQuantities[item.itemId] || 0) + item.quantity;
+        });
 
-      const newQuantities: Record<string, number> = {};
-      newItems.forEach(item => {
-        newQuantities[item.itemId] = (newQuantities[item.itemId] || 0) + item.quantity;
-      });
+        const newQuantities: Record<string, number> = {};
+        newItems.forEach(item => {
+          newQuantities[item.itemId] = (newQuantities[item.itemId] || 0) + item.quantity;
+        });
 
-      const allItemIds = new Set([...Object.keys(oldQuantities), ...Object.keys(newQuantities)]);
+        const allItemIds = new Set([...Object.keys(oldQuantities), ...Object.keys(newQuantities)]);
 
-      // First pass: validate all stock availability
-      const updates: { item: InventoryItem; newAvailable: number }[] = [];
-      for (const itemId of allItemIds) {
-        const oldQty = oldQuantities[itemId] || 0;
-        const newQty = newQuantities[itemId] || 0;
-        const delta = newQty - oldQty;
+        // First pass: validate all stock availability
+        const updates: { item: InventoryItem; newAvailable: number }[] = [];
+        for (const itemId of allItemIds) {
+          const oldQty = oldQuantities[itemId] || 0;
+          const newQty = newQuantities[itemId] || 0;
+          const delta = newQty - oldQty;
 
-        if (delta !== 0) {
-          const inventoryItem = inventory.find(i => i.id === itemId);
-          if (inventoryItem) {
-            const newAvailable = inventoryItem.availableQuantity - delta;
-            if (newAvailable < 0) {
-              alert(`Not enough stock for ${inventoryItem.name}. Available: ${inventoryItem.availableQuantity}, Requested additional: ${delta}`);
-              return;
+          if (delta !== 0) {
+            const inventoryItem = inventory.find(i => i.id === itemId);
+            if (inventoryItem) {
+              const newAvailable = inventoryItem.availableQuantity - delta;
+              if (newAvailable < 0) {
+                alert(`Not enough stock for ${inventoryItem.name}. Available: ${inventoryItem.availableQuantity}, Requested additional: ${delta}`);
+                setIsSubmitting(false);
+                return;
+              }
+              updates.push({ item: inventoryItem, newAvailable });
             }
-            updates.push({ item: inventoryItem, newAvailable });
           }
         }
-      }
 
-      // Second pass: apply all updates
-      for (const update of updates) {
-        const newItemState = { ...update.item, availableQuantity: update.newAvailable };
-        await updateInventoryItem(newItemState);
-        // Update local inventory state
-        setInventory(prev => prev.map(i => i.id === update.item.id ? newItemState : i));
+        // Second pass: apply all updates
+        for (const update of updates) {
+          const newItemState = { ...update.item, availableQuantity: update.newAvailable };
+          await updateInventoryItem(newItemState);
+          // Update local inventory state
+          setInventory(prev => prev.map(i => i.id === update.item.id ? newItemState : i));
+        }
       }
 
       // Aggregate duplicate items
@@ -755,6 +763,7 @@ const App: React.FC = () => {
         customerId: rentalForm.customerId,
         startDate: rentalForm.startDate,
         endDate: rentalForm.endDate,
+        ...(rentalToEdit.status === RentalStatus.RETURNED && { actualReturnDate: rentalForm.actualReturnDate }),
         items: aggregatedItems,
         paymentStatus: rentalForm.paymentStatus,
         totalCost: totalCost,
@@ -764,6 +773,11 @@ const App: React.FC = () => {
         rateType: rentalForm.rateType,
         manualMonths: rentalForm.manualMonths,
       };
+
+      // Recalculate final revenue if returned
+      if (updatedRental.status === RentalStatus.RETURNED) {
+         updatedRental.finalRevenue = updatedRental.totalCost + (updatedRental.deliveryFee || 0) + (updatedRental.damageFee || 0);
+      }
 
       await updateRental(updatedRental);
       
@@ -792,7 +806,6 @@ const App: React.FC = () => {
       deliveryFee: 0,
       paymentStatus: 'Pending'
     });
-    setSetCount(1);
     setRentalStep(1);
     setIsQuotationModalOpen(true);
   };
@@ -820,12 +833,33 @@ const App: React.FC = () => {
     }));
   };
 
-  const handleAddSet = () => {
-     const setItems = [
-       { itemId: inventory.find(i => i.name.includes("Main Frame"))?.id || '', multiplier: 2 },
-       { itemId: inventory.find(i => i.name.includes("Cross Brace"))?.id || '', multiplier: 2 },
-       { itemId: inventory.find(i => i.name.includes("Join Pin"))?.id || '', multiplier: 4 },
-     ];
+  const handleAddPackage = (packageId: string) => {
+     const count = packageCounts[packageId] || 1;
+     let itemsToAdd: { name: string, multiplier: number }[] = [];
+     
+     if (packageId === 'scaffolding_170') {
+         itemsToAdd = [
+             { name: 'Main Frame 170', multiplier: 2 },
+             { name: 'Cross Brace 220', multiplier: 2 },
+             { name: 'Join Pin', multiplier: 4 },
+         ];
+     } else if (packageId === 'roda_set') {
+         itemsToAdd = [
+             { name: 'New Roda 6Inch Tanpa Rem', multiplier: 2 },
+             { name: 'New Roda 6Inch Rem', multiplier: 2 },
+         ];
+     } else if (packageId === 'ladder_frame') {
+         itemsToAdd = [
+             { name: 'Ladder Frame 90', multiplier: 2 },
+             { name: 'Cross Brace 193', multiplier: 2 },
+             { name: 'Join Pin', multiplier: 4 },
+         ];
+     }
+
+     const setItems = itemsToAdd.map(item => ({
+         itemId: inventory.find(i => i.name === item.name)?.id || '',
+         multiplier: item.multiplier
+     }));
 
      let currentItems = [...rentalForm.items];
 
@@ -841,7 +875,7 @@ const App: React.FC = () => {
         const inventoryItem = inventory.find(i => i.id === itemId);
         if (!inventoryItem) return;
 
-        const qtyToAdd = setCount * multiplier;
+        const qtyToAdd = count * multiplier;
         const existingRowIndex = currentItems.findIndex(r => r.itemId === itemId);
 
         if (existingRowIndex > -1) {
@@ -863,6 +897,7 @@ const App: React.FC = () => {
      }
 
      setRentalForm(prev => ({ ...prev, items: currentItems }));
+     setPackageCounts(prev => ({ ...prev, [packageId]: 1 }));
   };
 
   const calculateDaysDiff = () => {
@@ -1054,17 +1089,50 @@ const App: React.FC = () => {
     let newDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
     if (newDays <= 0) newDays = 0;
 
-    // Calculate new item cost based on total duration
-    const newItemCost = rentalToExtend.items.reduce((total, rItem) => {
+    // Calculate added duration in calendar months and remainder days
+    let addedMonths = 0;
+    let addedRemainderDays = 0;
+    let totalAddedDays = 0;
+
+    if (newEnd > oldEnd) {
+        let tempDate = new Date(oldEnd);
+        while (true) {
+            const nextMonth = new Date(tempDate);
+            nextMonth.setMonth(nextMonth.getMonth() + 1);
+            if (nextMonth <= newEnd) {
+                addedMonths++;
+                tempDate = nextMonth;
+            } else {
+                break;
+            }
+        }
+        const remainderDiffTime = newEnd.getTime() - tempDate.getTime();
+        addedRemainderDays = Math.ceil(remainderDiffTime / (1000 * 60 * 60 * 24));
+        
+        const totalDiffTime = newEnd.getTime() - oldEnd.getTime();
+        totalAddedDays = Math.ceil(totalDiffTime / (1000 * 60 * 60 * 24));
+    }
+
+    // Calculate additional cost based on added duration
+    const additionalCost = rentalToExtend.items.reduce((total, rItem) => {
         const item = inventory.find(i => i.id === rItem.itemId);
         if (!item) return total;
-        return total + getItemRentalCost(item, rItem.quantity, newDays, false);
+        
+        if (item.monthlyPrice > 0) {
+            const monthlyCost = addedMonths * item.monthlyPrice;
+            const dailyCost = addedRemainderDays * item.unitPrice;
+            // Match existing duration logic (cap remainder at monthly price)
+            const effectiveRemainderCost = Math.min(dailyCost, item.monthlyPrice);
+            return total + ((monthlyCost + effectiveRemainderCost) * rItem.quantity);
+        }
+        
+        return total + (item.unitPrice * rItem.quantity * totalAddedDays);
     }, 0);
 
-    const additionalCost = newItemCost - rentalToExtend.totalCost;
+    const newTotal = rentalToExtend.totalCost + additionalCost;
 
     return {
-        newTotal: newItemCost,
+        newTotal,
         additionalCost,
         newDays
     };
@@ -3036,7 +3104,7 @@ const App: React.FC = () => {
                                  <div className="grid grid-cols-2 gap-4 mt-3">
                                     <div>
                                        <p className="text-[10px] uppercase text-neutral-500 font-bold">Duration</p>
-                                       <p className="text-xs text-neutral-300">{rental.startDate} <br/> to {rental.endDate}</p>
+                                       <p className="text-xs text-neutral-300">{rental.startDate} <br/> to {rental.actualReturnDate || rental.endDate}</p>
                                     </div>
                                     <div className="text-right">
                                        <p className="text-[10px] uppercase text-neutral-500 font-bold">Total</p>
@@ -3058,15 +3126,16 @@ const App: React.FC = () => {
                                        <span>{rental.paymentStatus}</span>
                                     </button>
 
+                                    <button
+                                       onClick={(e) => { e.stopPropagation(); handleEditRentalClick(rental); }}
+                                       className="px-3 py-2 bg-transparent border border-gray-600 text-white hover:bg-gray-800 rounded-lg"
+                                       title="Edit Rental"
+                                    >
+                                       <Pencil size={16} />
+                                    </button>
+
                                     {(rental.status === RentalStatus.ACTIVE || rental.status === RentalStatus.OVERDUE) && (
                                        <>
-                                          <button
-                                             onClick={(e) => { e.stopPropagation(); handleEditRentalClick(rental); }}
-                                             className="px-3 py-2 bg-transparent border border-gray-600 text-white hover:bg-gray-800 rounded-lg"
-                                             title="Edit Rental"
-                                          >
-                                             <Pencil size={16} />
-                                          </button>
                                           <button
                                              onClick={(e) => { e.stopPropagation(); handleExtendClick(rental); }}
                                              className="px-3 py-2 bg-amber-500/10 hover:bg-amber-500/20 text-amber-500 border border-amber-500/20 rounded-lg"
@@ -3187,7 +3256,7 @@ const App: React.FC = () => {
                                  <td className="px-8 py-6 whitespace-nowrap">
                                    <div className="flex flex-col">
                                      <span className="text-xs text-neutral-300 font-medium">{rental.startDate}</span>
-                                     <span className="text-[10px] text-neutral-600">to {rental.endDate}</span>
+                                     <span className="text-[10px] text-neutral-600">to {rental.actualReturnDate || rental.endDate}</span>
                                    </div>
                                  </td>
                                  <td className="px-8 py-6 whitespace-nowrap">
@@ -3233,16 +3302,16 @@ const App: React.FC = () => {
                                  </td>
                                  <td className="px-8 py-6 text-center whitespace-nowrap">
                                     <div className="flex items-center justify-center space-x-2">
+                                        <button
+                                            onClick={(e) => { e.stopPropagation(); handleEditRentalClick(rental); }}
+                                            className="inline-flex items-center space-x-1.5 text-xs font-bold text-white hover:text-gray-200 bg-transparent hover:bg-gray-800 px-3 py-2 rounded-xl transition-all border border-gray-600"
+                                            title="Edit Rental"
+                                        >
+                                            <Pencil size={14} />
+                                            <span>Edit</span>
+                                        </button>
                                         {(rental.status === RentalStatus.ACTIVE || rental.status === RentalStatus.OVERDUE) && (
                                             <>
-                                                <button
-                                                    onClick={(e) => { e.stopPropagation(); handleEditRentalClick(rental); }}
-                                                    className="inline-flex items-center space-x-1.5 text-xs font-bold text-white hover:text-gray-200 bg-transparent hover:bg-gray-800 px-3 py-2 rounded-xl transition-all border border-gray-600"
-                                                    title="Edit Rental"
-                                                >
-                                                    <Pencil size={14} />
-                                                    <span>Edit</span>
-                                                </button>
                                                 <button
                                                     onClick={(e) => { e.stopPropagation(); handleExtendClick(rental); }}
                                                     className="inline-flex items-center space-x-1.5 text-xs font-bold text-amber-500 hover:text-amber-400 bg-amber-500/10 hover:bg-amber-500/20 px-3 py-2 rounded-xl transition-all border border-amber-500/20"
@@ -4398,37 +4467,96 @@ const App: React.FC = () => {
                 {rentalStep === 3 && (
                   <div className="space-y-6 animate-in fade-in slide-in-from-right-8 duration-300">
                     {/* Quick Add Set UI */}
-                    <div className="bg-gradient-to-br from-blue-900/20 to-blue-900/5 border border-white/20 rounded-2xl p-4 md:p-5">
-                        <div className="flex flex-col gap-4">
-                            <div className="flex items-start space-x-4">
-                                <div className="p-3 bg-white rounded-xl text-black shrink-0 shadow-lg shadow-white/10">
-                                    <Layers size={24} />
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        {/* Package 1 */}
+                        <div className="bg-gray-800/50 border border-gray-700 rounded-2xl p-4 flex flex-col justify-between">
+                            <div className="mb-4">
+                                <div className="flex items-center gap-2 mb-2">
+                                    <div className="p-2 bg-neutral-700 rounded-lg text-white">
+                                        <Layers size={16} />
+                                    </div>
+                                    <h4 className="text-sm font-bold text-white">Set Scaffolding 170</h4>
                                 </div>
-                                <div>
-                                    <h4 className="text-base font-bold text-white">Quick Add Set</h4>
-                                    <p className="text-[11px] text-neutral-400 mt-1 leading-relaxed">
-                                      Includes: 2x Main Frame, 2x Cross Brace, 4x Join Pin
-                                    </p>
-                                </div>
+                                <p className="text-[10px] text-neutral-400 leading-relaxed">
+                                  2x Main Frame 170<br/>2x Cross Brace 220<br/>4x Join Pin
+                                </p>
                             </div>
-                            
-                            <div className="flex items-center gap-3 bg-black/20 p-2 rounded-xl border border-white/5">
-                                <div className="flex-1 flex flex-col px-2">
-                                    <label className="text-[9px] font-black uppercase tracking-widest text-neutral-500 mb-0.5">Quantity</label>
-                                    <input 
-                                        type="number" 
-                                        min="1"
-                                        value={setCount}
-                                        onChange={(e) => setSetCount(Math.max(1, parseInt(e.target.value) || 0))}
-                                        className="w-full bg-transparent font-bold text-white focus:outline-none text-lg"
-                                    />
-                                </div>
+                            <div className="flex items-center gap-2 bg-black/20 p-1.5 rounded-xl border border-white/5">
+                                <input 
+                                    type="number" 
+                                    min="1"
+                                    value={packageCounts['scaffolding_170'] || 1}
+                                    onChange={(e) => setPackageCounts(prev => ({ ...prev, scaffolding_170: Math.max(1, parseInt(e.target.value) || 0) }))}
+                                    className="w-12 bg-transparent font-bold text-white focus:outline-none text-center text-sm"
+                                />
                                 <button 
                                     type="button"
-                                    onClick={handleAddSet}
-                                    className="h-10 px-4 bg-white hover:bg-gray-200 text-black font-bold rounded-lg transition-all active:scale-95 flex items-center justify-center shadow-lg text-sm"
+                                    onClick={() => handleAddPackage('scaffolding_170')}
+                                    className="flex-1 h-8 bg-white hover:bg-gray-200 text-black font-bold rounded-lg transition-all active:scale-95 flex items-center justify-center text-xs"
                                 >
-                                    <Plus size={16} className="mr-2" /> Add
+                                    <Plus size={14} className="mr-1" /> Add
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Package 2 */}
+                        <div className="bg-gray-800/50 border border-gray-700 rounded-2xl p-4 flex flex-col justify-between">
+                            <div className="mb-4">
+                                <div className="flex items-center gap-2 mb-2">
+                                    <div className="p-2 bg-neutral-700 rounded-lg text-white">
+                                        <Package size={16} />
+                                    </div>
+                                    <h4 className="text-sm font-bold text-white">Roda Set</h4>
+                                </div>
+                                <p className="text-[10px] text-neutral-400 leading-relaxed">
+                                  2x New Roda 6Inch Tanpa Rem<br/>2x New Roda 6Inch Rem
+                                </p>
+                            </div>
+                            <div className="flex items-center gap-2 bg-black/20 p-1.5 rounded-xl border border-white/5">
+                                <input 
+                                    type="number" 
+                                    min="1"
+                                    value={packageCounts['roda_set'] || 1}
+                                    onChange={(e) => setPackageCounts(prev => ({ ...prev, roda_set: Math.max(1, parseInt(e.target.value) || 0) }))}
+                                    className="w-12 bg-transparent font-bold text-white focus:outline-none text-center text-sm"
+                                />
+                                <button 
+                                    type="button"
+                                    onClick={() => handleAddPackage('roda_set')}
+                                    className="flex-1 h-8 bg-white hover:bg-gray-200 text-black font-bold rounded-lg transition-all active:scale-95 flex items-center justify-center text-xs"
+                                >
+                                    <Plus size={14} className="mr-1" /> Add
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Package 3 */}
+                        <div className="bg-gray-800/50 border border-gray-700 rounded-2xl p-4 flex flex-col justify-between">
+                            <div className="mb-4">
+                                <div className="flex items-center gap-2 mb-2">
+                                    <div className="p-2 bg-neutral-700 rounded-lg text-white">
+                                        <Archive size={16} />
+                                    </div>
+                                    <h4 className="text-sm font-bold text-white">Ladder Frame Set</h4>
+                                </div>
+                                <p className="text-[10px] text-neutral-400 leading-relaxed">
+                                  2x Ladder Frame 90<br/>2x Cross Brace 193<br/>4x Join Pin
+                                </p>
+                            </div>
+                            <div className="flex items-center gap-2 bg-black/20 p-1.5 rounded-xl border border-white/5">
+                                <input 
+                                    type="number" 
+                                    min="1"
+                                    value={packageCounts['ladder_frame'] || 1}
+                                    onChange={(e) => setPackageCounts(prev => ({ ...prev, ladder_frame: Math.max(1, parseInt(e.target.value) || 0) }))}
+                                    className="w-12 bg-transparent font-bold text-white focus:outline-none text-center text-sm"
+                                />
+                                <button 
+                                    type="button"
+                                    onClick={() => handleAddPackage('ladder_frame')}
+                                    className="flex-1 h-8 bg-white hover:bg-gray-200 text-black font-bold rounded-lg transition-all active:scale-95 flex items-center justify-center text-xs"
+                                >
+                                    <Plus size={14} className="mr-1" /> Add
                                 </button>
                             </div>
                         </div>
@@ -4831,38 +4959,111 @@ const App: React.FC = () => {
                 {/* Step 3: Equipment */}
                 {rentalStep === 3 && (
                   <div className="space-y-6 animate-in fade-in slide-in-from-right-8 duration-300">
+                    {rentalToEdit?.status === RentalStatus.RETURNED && (
+                        <div className="bg-amber-500/10 border border-amber-500/20 rounded-xl p-4 flex items-start space-x-3 mb-4">
+                            <AlertCircle size={16} className="text-amber-500 shrink-0 mt-0.5" />
+                            <p className="text-xs text-amber-500/90 leading-relaxed">
+                                Equipment selection is locked because this contract has already been returned. You can only edit financial details and dates.
+                            </p>
+                        </div>
+                    )}
                     {/* Quick Add Set UI */}
-                    <div className="bg-gradient-to-br from-blue-900/20 to-blue-900/5 border border-white/20 rounded-2xl p-4 md:p-5">
-                        <div className="flex flex-col gap-4">
-                            <div className="flex items-start space-x-4">
-                                <div className="p-3 bg-white rounded-xl text-black shrink-0 shadow-lg shadow-white/10">
-                                    <Layers size={24} />
+                    <div className={`grid grid-cols-1 md:grid-cols-3 gap-4 ${rentalToEdit?.status === RentalStatus.RETURNED ? 'opacity-50 pointer-events-none' : ''}`}>
+                        {/* Package 1 */}
+                        <div className="bg-gray-800/50 border border-gray-700 rounded-2xl p-4 flex flex-col justify-between">
+                            <div className="mb-4">
+                                <div className="flex items-center gap-2 mb-2">
+                                    <div className="p-2 bg-neutral-700 rounded-lg text-white">
+                                        <Layers size={16} />
+                                    </div>
+                                    <h4 className="text-sm font-bold text-white">Set Scaffolding 170</h4>
                                 </div>
-                                <div>
-                                    <h4 className="text-base font-bold text-white">Quick Add Set</h4>
-                                    <p className="text-[11px] text-neutral-400 mt-1 leading-relaxed">
-                                      Includes: 2x Main Frame, 2x Cross Brace, 4x Join Pin
-                                    </p>
-                                </div>
+                                <p className="text-[10px] text-neutral-400 leading-relaxed">
+                                  2x Main Frame 170<br/>2x Cross Brace 220<br/>4x Join Pin
+                                </p>
                             </div>
-                            
-                            <div className="flex items-center gap-3 bg-black/20 p-2 rounded-xl border border-white/5">
-                                <div className="flex-1 flex flex-col px-2">
-                                    <label className="text-[9px] font-black uppercase tracking-widest text-neutral-500 mb-0.5">Quantity</label>
-                                    <input 
-                                        type="number" 
-                                        min="1"
-                                        value={setCount}
-                                        onChange={(e) => setSetCount(Math.max(1, parseInt(e.target.value) || 0))}
-                                        className="w-full bg-transparent font-bold text-white focus:outline-none text-lg"
-                                    />
-                                </div>
+                            <div className="flex items-center gap-2 bg-black/20 p-1.5 rounded-xl border border-white/5">
+                                <input 
+                                    type="number" 
+                                    min="1"
+                                    value={packageCounts['scaffolding_170'] || 1}
+                                    onChange={(e) => setPackageCounts(prev => ({ ...prev, scaffolding_170: Math.max(1, parseInt(e.target.value) || 0) }))}
+                                    className="w-12 bg-transparent font-bold text-white focus:outline-none text-center text-sm"
+                                    disabled={rentalToEdit?.status === RentalStatus.RETURNED}
+                                />
                                 <button 
                                     type="button"
-                                    onClick={handleAddSet}
-                                    className="h-10 px-4 bg-white hover:bg-gray-200 text-black font-bold rounded-lg transition-all active:scale-95 flex items-center justify-center shadow-lg text-sm"
+                                    onClick={() => handleAddPackage('scaffolding_170')}
+                                    className="flex-1 h-8 bg-white hover:bg-gray-200 text-black font-bold rounded-lg transition-all active:scale-95 flex items-center justify-center text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+                                    disabled={rentalToEdit?.status === RentalStatus.RETURNED}
                                 >
-                                    <Plus size={16} className="mr-2" /> Add
+                                    <Plus size={14} className="mr-1" /> Add
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Package 2 */}
+                        <div className="bg-gray-800/50 border border-gray-700 rounded-2xl p-4 flex flex-col justify-between">
+                            <div className="mb-4">
+                                <div className="flex items-center gap-2 mb-2">
+                                    <div className="p-2 bg-neutral-700 rounded-lg text-white">
+                                        <Package size={16} />
+                                    </div>
+                                    <h4 className="text-sm font-bold text-white">Roda Set</h4>
+                                </div>
+                                <p className="text-[10px] text-neutral-400 leading-relaxed">
+                                  2x New Roda 6Inch Tanpa Rem<br/>2x New Roda 6Inch Rem
+                                </p>
+                            </div>
+                            <div className="flex items-center gap-2 bg-black/20 p-1.5 rounded-xl border border-white/5">
+                                <input 
+                                    type="number" 
+                                    min="1"
+                                    value={packageCounts['roda_set'] || 1}
+                                    onChange={(e) => setPackageCounts(prev => ({ ...prev, roda_set: Math.max(1, parseInt(e.target.value) || 0) }))}
+                                    className="w-12 bg-transparent font-bold text-white focus:outline-none text-center text-sm"
+                                    disabled={rentalToEdit?.status === RentalStatus.RETURNED}
+                                />
+                                <button 
+                                    type="button"
+                                    onClick={() => handleAddPackage('roda_set')}
+                                    className="flex-1 h-8 bg-white hover:bg-gray-200 text-black font-bold rounded-lg transition-all active:scale-95 flex items-center justify-center text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+                                    disabled={rentalToEdit?.status === RentalStatus.RETURNED}
+                                >
+                                    <Plus size={14} className="mr-1" /> Add
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Package 3 */}
+                        <div className="bg-gray-800/50 border border-gray-700 rounded-2xl p-4 flex flex-col justify-between">
+                            <div className="mb-4">
+                                <div className="flex items-center gap-2 mb-2">
+                                    <div className="p-2 bg-neutral-700 rounded-lg text-white">
+                                        <Archive size={16} />
+                                    </div>
+                                    <h4 className="text-sm font-bold text-white">Ladder Frame Set</h4>
+                                </div>
+                                <p className="text-[10px] text-neutral-400 leading-relaxed">
+                                  2x Ladder Frame 90<br/>2x Cross Brace 193<br/>4x Join Pin
+                                </p>
+                            </div>
+                            <div className="flex items-center gap-2 bg-black/20 p-1.5 rounded-xl border border-white/5">
+                                <input 
+                                    type="number" 
+                                    min="1"
+                                    value={packageCounts['ladder_frame'] || 1}
+                                    onChange={(e) => setPackageCounts(prev => ({ ...prev, ladder_frame: Math.max(1, parseInt(e.target.value) || 0) }))}
+                                    className="w-12 bg-transparent font-bold text-white focus:outline-none text-center text-sm"
+                                    disabled={rentalToEdit?.status === RentalStatus.RETURNED}
+                                />
+                                <button 
+                                    type="button"
+                                    onClick={() => handleAddPackage('ladder_frame')}
+                                    className="flex-1 h-8 bg-white hover:bg-gray-200 text-black font-bold rounded-lg transition-all active:scale-95 flex items-center justify-center text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+                                    disabled={rentalToEdit?.status === RentalStatus.RETURNED}
+                                >
+                                    <Plus size={14} className="mr-1" /> Add
                                 </button>
                             </div>
                         </div>
@@ -4890,14 +5091,16 @@ const App: React.FC = () => {
                             : 0;
                         
                         return (
-                            <div key={row.id} className="relative bg-neutral-900/60 p-4 rounded-2xl border border-neutral-800 hover:border-white/30 transition-all group">
-                                <button 
-                                    type="button"
-                                    onClick={() => removeRentalItemRow(row.id)}
-                                    className="absolute -top-2 -right-2 bg-neutral-800 text-neutral-400 hover:text-rose-500 hover:bg-neutral-700 p-1.5 rounded-full border border-neutral-700 shadow-sm transition-all z-10"
-                                >
-                                    <X size={14} />
-                                </button>
+                            <div key={row.id} className={`relative bg-neutral-900/60 p-4 rounded-2xl border border-neutral-800 hover:border-white/30 transition-all group ${rentalToEdit?.status === RentalStatus.RETURNED ? 'opacity-50 pointer-events-none' : ''}`}>
+                                {rentalToEdit?.status !== RentalStatus.RETURNED && (
+                                    <button 
+                                        type="button"
+                                        onClick={() => removeRentalItemRow(row.id)}
+                                        className="absolute -top-2 -right-2 bg-neutral-800 text-neutral-400 hover:text-rose-500 hover:bg-neutral-700 p-1.5 rounded-full border border-neutral-700 shadow-sm transition-all z-10"
+                                    >
+                                        <X size={14} />
+                                    </button>
+                                )}
 
                                 <div className="grid grid-cols-1 gap-4">
                                     {/* Item Select */}
@@ -4909,6 +5112,7 @@ const App: React.FC = () => {
                                                 className="w-full bg-neutral-950 border border-neutral-800 rounded-xl pl-3 pr-8 py-3 text-sm focus:ring-1 focus:ring-gray-500 outline-none text-white appearance-none"
                                                 value={row.itemId}
                                                 onChange={(e) => updateRentalItemRow(row.id, 'itemId', e.target.value)}
+                                                disabled={rentalToEdit?.status === RentalStatus.RETURNED}
                                             >
                                                 <option value="">Choose item...</option>
                                                 {inventory.map(item => (
@@ -4935,6 +5139,7 @@ const App: React.FC = () => {
                                                 className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-2 py-2.5 text-sm focus:ring-1 focus:ring-gray-500 outline-none text-white font-bold text-center"
                                                 value={row.quantity}
                                                 onChange={(e) => updateRentalItemRow(row.id, 'quantity', parseInt(e.target.value) || 0)}
+                                                disabled={rentalToEdit?.status === RentalStatus.RETURNED}
                                             />
                                         </div>
                                         <div className="col-span-4">
@@ -4950,13 +5155,15 @@ const App: React.FC = () => {
                         })}
                     </div>
                    
-                    <button 
-                      type="button"
-                      onClick={addRentalItemRow}
-                      className="w-full py-3.5 border border-dashed border-neutral-800 rounded-xl flex items-center justify-center text-neutral-500 hover:text-white hover:border-white/30 hover:bg-white/5 transition-all text-xs font-bold uppercase tracking-widest mt-4 group"
-                    >
-                      <Plus size={16} className="mr-2 group-hover:scale-110 transition-transform" /> Add Item
-                    </button>
+                    {rentalToEdit?.status !== RentalStatus.RETURNED && (
+                        <button 
+                          type="button"
+                          onClick={addRentalItemRow}
+                          className="w-full py-3.5 border border-dashed border-neutral-800 rounded-xl flex items-center justify-center text-neutral-500 hover:text-white hover:border-white/30 hover:bg-white/5 transition-all text-xs font-bold uppercase tracking-widest mt-4 group"
+                        >
+                          <Plus size={16} className="mr-2 group-hover:scale-110 transition-transform" /> Add Item
+                        </button>
+                    )}
                   </div>
                 )}
 
@@ -5019,6 +5226,22 @@ const App: React.FC = () => {
                                <ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 text-neutral-500 pointer-events-none" size={16} />
                             </div>
                        </div>
+                       {rentalToEdit?.status === RentalStatus.RETURNED && (
+                           <div>
+                               <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">Actual Return Date</label>
+                               <div className="relative">
+                                   <Calendar className="absolute left-4 top-1/2 -translate-y-1/2 text-neutral-500 pointer-events-none" size={18} />
+                                   <input 
+                                       type="date"
+                                       required
+                                       className="w-full h-[52px] bg-neutral-900 border border-neutral-700 rounded-xl pl-12 pr-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white appearance-none [color-scheme:dark] text-left"
+                                       value={rentalForm.actualReturnDate || ''}
+                                       min={rentalForm.startDate}
+                                       onChange={(e) => setRentalForm({ ...rentalForm, actualReturnDate: e.target.value })}
+                                   />
+                               </div>
+                           </div>
+                       )}
                     </div>
 
                     <div className="bg-neutral-900 p-5 rounded-2xl border border-neutral-800">
@@ -5266,37 +5489,96 @@ const App: React.FC = () => {
                 {rentalStep === 3 && (
                   <div className="space-y-6 animate-in fade-in slide-in-from-right-8 duration-300">
                     {/* Quick Add Set UI */}
-                    <div className="bg-gradient-to-br from-blue-900/20 to-blue-900/5 border border-white/20 rounded-2xl p-4 md:p-5">
-                        <div className="flex flex-col gap-4">
-                            <div className="flex items-start space-x-4">
-                                <div className="p-3 bg-white rounded-xl text-black shrink-0 shadow-lg shadow-white/10">
-                                    <Layers size={24} />
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        {/* Package 1 */}
+                        <div className="bg-gray-800/50 border border-gray-700 rounded-2xl p-4 flex flex-col justify-between">
+                            <div className="mb-4">
+                                <div className="flex items-center gap-2 mb-2">
+                                    <div className="p-2 bg-neutral-700 rounded-lg text-white">
+                                        <Layers size={16} />
+                                    </div>
+                                    <h4 className="text-sm font-bold text-white">Set Scaffolding 170</h4>
                                 </div>
-                                <div>
-                                    <h4 className="text-base font-bold text-white">Quick Add Set</h4>
-                                    <p className="text-[11px] text-neutral-400 mt-1 leading-relaxed">
-                                      Includes: 2x Main Frame, 2x Cross Brace, 4x Join Pin
-                                    </p>
-                                </div>
+                                <p className="text-[10px] text-neutral-400 leading-relaxed">
+                                  2x Main Frame 170<br/>2x Cross Brace 220<br/>4x Join Pin
+                                </p>
                             </div>
-                            
-                            <div className="flex items-center gap-3 bg-black/20 p-2 rounded-xl border border-white/5">
-                                <div className="flex-1 flex flex-col px-2">
-                                    <label className="text-[9px] font-black uppercase tracking-widest text-neutral-500 mb-0.5">Quantity</label>
-                                    <input 
-                                        type="number" 
-                                        min="1"
-                                        value={setCount}
-                                        onChange={(e) => setSetCount(Math.max(1, parseInt(e.target.value) || 0))}
-                                        className="w-full bg-transparent font-bold text-white focus:outline-none text-lg"
-                                    />
-                                </div>
+                            <div className="flex items-center gap-2 bg-black/20 p-1.5 rounded-xl border border-white/5">
+                                <input 
+                                    type="number" 
+                                    min="1"
+                                    value={packageCounts['scaffolding_170'] || 1}
+                                    onChange={(e) => setPackageCounts(prev => ({ ...prev, scaffolding_170: Math.max(1, parseInt(e.target.value) || 0) }))}
+                                    className="w-12 bg-transparent font-bold text-white focus:outline-none text-center text-sm"
+                                />
                                 <button 
                                     type="button"
-                                    onClick={handleAddSet}
-                                    className="h-10 px-4 bg-white hover:bg-gray-200 text-black font-bold rounded-lg transition-all active:scale-95 flex items-center justify-center shadow-lg text-sm"
+                                    onClick={() => handleAddPackage('scaffolding_170')}
+                                    className="flex-1 h-8 bg-white hover:bg-gray-200 text-black font-bold rounded-lg transition-all active:scale-95 flex items-center justify-center text-xs"
                                 >
-                                    <Plus size={16} className="mr-2" /> Add
+                                    <Plus size={14} className="mr-1" /> Add
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Package 2 */}
+                        <div className="bg-gray-800/50 border border-gray-700 rounded-2xl p-4 flex flex-col justify-between">
+                            <div className="mb-4">
+                                <div className="flex items-center gap-2 mb-2">
+                                    <div className="p-2 bg-neutral-700 rounded-lg text-white">
+                                        <Package size={16} />
+                                    </div>
+                                    <h4 className="text-sm font-bold text-white">Roda Set</h4>
+                                </div>
+                                <p className="text-[10px] text-neutral-400 leading-relaxed">
+                                  2x New Roda 6Inch Tanpa Rem<br/>2x New Roda 6Inch Rem
+                                </p>
+                            </div>
+                            <div className="flex items-center gap-2 bg-black/20 p-1.5 rounded-xl border border-white/5">
+                                <input 
+                                    type="number" 
+                                    min="1"
+                                    value={packageCounts['roda_set'] || 1}
+                                    onChange={(e) => setPackageCounts(prev => ({ ...prev, roda_set: Math.max(1, parseInt(e.target.value) || 0) }))}
+                                    className="w-12 bg-transparent font-bold text-white focus:outline-none text-center text-sm"
+                                />
+                                <button 
+                                    type="button"
+                                    onClick={() => handleAddPackage('roda_set')}
+                                    className="flex-1 h-8 bg-white hover:bg-gray-200 text-black font-bold rounded-lg transition-all active:scale-95 flex items-center justify-center text-xs"
+                                >
+                                    <Plus size={14} className="mr-1" /> Add
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Package 3 */}
+                        <div className="bg-gray-800/50 border border-gray-700 rounded-2xl p-4 flex flex-col justify-between">
+                            <div className="mb-4">
+                                <div className="flex items-center gap-2 mb-2">
+                                    <div className="p-2 bg-neutral-700 rounded-lg text-white">
+                                        <Archive size={16} />
+                                    </div>
+                                    <h4 className="text-sm font-bold text-white">Ladder Frame Set</h4>
+                                </div>
+                                <p className="text-[10px] text-neutral-400 leading-relaxed">
+                                  2x Ladder Frame 90<br/>2x Cross Brace 193<br/>4x Join Pin
+                                </p>
+                            </div>
+                            <div className="flex items-center gap-2 bg-black/20 p-1.5 rounded-xl border border-white/5">
+                                <input 
+                                    type="number" 
+                                    min="1"
+                                    value={packageCounts['ladder_frame'] || 1}
+                                    onChange={(e) => setPackageCounts(prev => ({ ...prev, ladder_frame: Math.max(1, parseInt(e.target.value) || 0) }))}
+                                    className="w-12 bg-transparent font-bold text-white focus:outline-none text-center text-sm"
+                                />
+                                <button 
+                                    type="button"
+                                    onClick={() => handleAddPackage('ladder_frame')}
+                                    className="flex-1 h-8 bg-white hover:bg-gray-200 text-black font-bold rounded-lg transition-all active:scale-95 flex items-center justify-center text-xs"
+                                >
+                                    <Plus size={14} className="mr-1" /> Add
                                 </button>
                             </div>
                         </div>
@@ -5799,7 +6081,25 @@ const App: React.FC = () => {
                     </div>
                     
                     <div>
-                         <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1">New End Date</label>
+                         <div className="flex justify-between items-center mb-2">
+                             <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest">New End Date</label>
+                             <div className="flex gap-2">
+                                 {[1, 2, 3, 6].map(months => (
+                                     <button
+                                         key={months}
+                                         type="button"
+                                         onClick={() => {
+                                             const d = new Date(rentalToExtend.endDate);
+                                             d.setMonth(d.getMonth() + months);
+                                             setExtensionDate(d.toISOString().split('T')[0]);
+                                         }}
+                                         className="bg-transparent border border-gray-600 text-white hover:bg-gray-800 text-xs py-1 px-2 rounded transition-colors"
+                                     >
+                                         +{months} Month{months > 1 ? 's' : ''}
+                                     </button>
+                                 ))}
+                             </div>
+                         </div>
                          <input 
                             type="date"
                             className="w-full h-12 bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-3 text-base md:text-sm focus:ring-1 focus:ring-amber-500 outline-none text-white appearance-none [color-scheme:dark] text-left"
