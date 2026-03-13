@@ -41,6 +41,8 @@ export interface Customer {
 export interface RentalItem {
   itemId: string;
   quantity: number;
+  lockedRatePerMonth?: number;
+  lockedRatePerDay?: number;
 }
 
 export interface ReturnItemSnapshot {

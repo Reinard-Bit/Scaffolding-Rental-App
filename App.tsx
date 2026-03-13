@@ -95,6 +95,7 @@ interface RentalItemRow {
   id: string; // temporary id for UI list
   itemId: string;
   quantity: number;
+  lockedRatePerMonth?: number;
 }
 
 const App: React.FC = () => {
@@ -670,7 +671,9 @@ const App: React.FC = () => {
       items: rental.items.map(item => ({
         id: Math.random().toString(36).substr(2, 9),
         itemId: item.itemId,
-        quantity: item.quantity
+        quantity: item.quantity,
+        lockedRatePerMonth: item.lockedRatePerMonth,
+        lockedRatePerDay: item.lockedRatePerDay
       })),
       rateType: rental.rateType || 'Daily',
       manualMonths: rental.manualMonths || 1,
@@ -746,15 +749,27 @@ const App: React.FC = () => {
 
       // Aggregate duplicate items
       const validItems = rentalForm.items.filter(i => i.itemId && i.quantity > 0);
-      const aggregatedItemsMap = new Map<string, number>();
-      for (const item of validItems) {
-          const current = aggregatedItemsMap.get(item.itemId) || 0;
-          aggregatedItemsMap.set(item.itemId, current + item.quantity);
+      const aggregatedItemsMap = new Map<string, any>();
+      for (const row of validItems) {
+          const item = inventory.find(i => i.id === row.itemId);
+          const defaultMonthly = item ? (rentalForm.rateType === 'Monthly' ? item.monthlyPrice : item.unitPrice * 30) : 0;
+          const lockedRatePerMonth = row.lockedRatePerMonth !== undefined ? row.lockedRatePerMonth : defaultMonthly;
+          const lockedRatePerDay = lockedRatePerMonth / 30;
+          
+          const key = `${row.itemId}_${lockedRatePerMonth}`;
+          if (aggregatedItemsMap.has(key)) {
+              const current = aggregatedItemsMap.get(key);
+              current.quantity += row.quantity;
+          } else {
+              aggregatedItemsMap.set(key, {
+                  itemId: row.itemId,
+                  quantity: row.quantity,
+                  lockedRatePerMonth,
+                  lockedRatePerDay
+              });
+          }
       }
-      const aggregatedItems = Array.from(aggregatedItemsMap.entries()).map(([itemId, quantity]) => ({
-          itemId,
-          quantity
-      }));
+      const aggregatedItems = Array.from(aggregatedItemsMap.values());
 
       const totalCost = calculateRentalTotal();
 
@@ -909,21 +924,24 @@ const App: React.FC = () => {
     return diffDays > 0 ? diffDays : 0;
   };
 
-  const getItemRentalCost = (item: InventoryItem, quantity: number, duration: number, isMonthlyFixed: boolean) => {
+  const getItemRentalCost = (item: InventoryItem, quantity: number, duration: number, isMonthlyFixed: boolean, lockedRatePerMonth?: number, lockedRatePerDay?: number) => {
+    const monthlyPrice = lockedRatePerMonth !== undefined ? lockedRatePerMonth : item.monthlyPrice;
+    const unitPrice = lockedRatePerDay !== undefined ? lockedRatePerDay : item.unitPrice;
+
     if (isMonthlyFixed) {
-       return item.monthlyPrice * quantity * duration;
+       return monthlyPrice * quantity * duration;
     }
 
     const days = duration;
-    if (item.monthlyPrice > 0) {
+    if (monthlyPrice > 0) {
       const months = Math.floor(days / 30);
       const remainingDays = days % 30;
-      const monthlyCost = months * item.monthlyPrice;
-      const dailyCost = remainingDays * item.unitPrice;
-      const effectiveRemainderCost = Math.min(dailyCost, item.monthlyPrice);
+      const monthlyCost = months * monthlyPrice;
+      const dailyCost = remainingDays * unitPrice;
+      const effectiveRemainderCost = Math.min(dailyCost, monthlyPrice);
       return (monthlyCost + effectiveRemainderCost) * quantity;
     }
-    return item.unitPrice * quantity * days;
+    return unitPrice * quantity * days;
   };
 
   const calculateRentalTotal = () => {
@@ -931,7 +949,7 @@ const App: React.FC = () => {
          return rentalForm.items.reduce((total, row) => {
           const item = inventory.find(i => i.id === row.itemId);
           if (!item) return total;
-          return total + getItemRentalCost(item, row.quantity, rentalForm.manualMonths, true);
+          return total + getItemRentalCost(item, row.quantity, rentalForm.manualMonths, true, row.lockedRatePerMonth, row.lockedRatePerMonth !== undefined ? row.lockedRatePerMonth / 30 : undefined);
         }, 0);
     }
     
@@ -941,7 +959,7 @@ const App: React.FC = () => {
     return rentalForm.items.reduce((total, row) => {
       const item = inventory.find(i => i.id === row.itemId);
       if (!item) return total;
-      return total + getItemRentalCost(item, row.quantity, days, false);
+      return total + getItemRentalCost(item, row.quantity, days, false, row.lockedRatePerMonth, row.lockedRatePerMonth !== undefined ? row.lockedRatePerMonth / 30 : undefined);
     }, 0);
   };
 
@@ -964,16 +982,28 @@ const App: React.FC = () => {
         if (validItems.length === 0) return;
 
         // Aggregate duplicate items
-        const aggregatedItemsMap = new Map<string, number>();
-        for (const item of validItems) {
-            const current = aggregatedItemsMap.get(item.itemId) || 0;
-            aggregatedItemsMap.set(item.itemId, current + item.quantity);
+        const aggregatedItemsMap = new Map<string, any>();
+        for (const row of validItems) {
+            const item = inventory.find(i => i.id === row.itemId);
+            const defaultMonthly = item ? (rentalForm.rateType === 'Monthly' ? item.monthlyPrice : item.unitPrice * 30) : 0;
+            const lockedRatePerMonth = row.lockedRatePerMonth !== undefined ? row.lockedRatePerMonth : defaultMonthly;
+            const lockedRatePerDay = lockedRatePerMonth / 30;
+            
+            const key = `${row.itemId}_${lockedRatePerMonth}`;
+            if (aggregatedItemsMap.has(key)) {
+                const current = aggregatedItemsMap.get(key);
+                current.quantity += row.quantity;
+            } else {
+                aggregatedItemsMap.set(key, {
+                    itemId: row.itemId,
+                    quantity: row.quantity,
+                    lockedRatePerMonth,
+                    lockedRatePerDay
+                });
+            }
         }
         
-        const aggregatedItems = Array.from(aggregatedItemsMap.entries()).map(([itemId, quantity]) => ({
-            itemId,
-            quantity
-        }));
+        const aggregatedItems = Array.from(aggregatedItemsMap.values());
 
         // Check Stock Availability
         for (const row of aggregatedItems) {
@@ -1118,15 +1148,18 @@ const App: React.FC = () => {
         const item = inventory.find(i => i.id === rItem.itemId);
         if (!item) return total;
         
-        if (item.monthlyPrice > 0) {
-            const monthlyCost = addedMonths * item.monthlyPrice;
-            const dailyCost = addedRemainderDays * item.unitPrice;
+        const monthlyPrice = rItem.lockedRatePerMonth !== undefined ? rItem.lockedRatePerMonth : item.monthlyPrice;
+        const unitPrice = rItem.lockedRatePerDay !== undefined ? rItem.lockedRatePerDay : item.unitPrice;
+        
+        if (monthlyPrice > 0) {
+            const monthlyCost = addedMonths * monthlyPrice;
+            const dailyCost = addedRemainderDays * unitPrice;
             // Match existing duration logic (cap remainder at monthly price)
-            const effectiveRemainderCost = Math.min(dailyCost, item.monthlyPrice);
+            const effectiveRemainderCost = Math.min(dailyCost, monthlyPrice);
             return total + ((monthlyCost + effectiveRemainderCost) * rItem.quantity);
         }
         
-        return total + (item.unitPrice * rItem.quantity * totalAddedDays);
+        return total + (unitPrice * rItem.quantity * totalAddedDays);
     }, 0);
 
     const newTotal = rentalToExtend.totalCost + additionalCost;
@@ -4579,7 +4612,9 @@ const App: React.FC = () => {
                                 item, 
                                 row.quantity, 
                                 rentalForm.rateType === 'Monthly' ? rentalForm.manualMonths : calculateDaysDiff(), 
-                                rentalForm.rateType === 'Monthly'
+                                rentalForm.rateType === 'Monthly',
+                                row.lockedRatePerMonth,
+                                row.lockedRatePerMonth !== undefined ? row.lockedRatePerMonth / 30 : undefined
                                 ) 
                             : 0;
                         
@@ -4616,9 +4651,23 @@ const App: React.FC = () => {
                                     <div className="grid grid-cols-12 gap-3">
                                         <div className="col-span-5">
                                             <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1">Rate</label>
-                                            <div className="text-xs font-bold text-neutral-400 py-3 px-3 bg-neutral-950 rounded-xl border border-neutral-800 truncate">
-                                                {item ? formatCurrency(rentalForm.rateType === 'Monthly' ? item.monthlyPrice : item.unitPrice) : '-'}
-                                            </div>
+                                            {item ? (
+                                                <input
+                                                    type="number"
+                                                    min="0"
+                                                    className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-2 py-2.5 text-sm focus:ring-1 focus:ring-gray-500 outline-none text-white font-bold"
+                                                    value={row.lockedRatePerMonth !== undefined ? (rentalForm.rateType === 'Monthly' ? row.lockedRatePerMonth : Math.round(row.lockedRatePerMonth / 30)) : (rentalForm.rateType === 'Monthly' ? item.monthlyPrice : item.unitPrice)}
+                                                    onChange={(e) => {
+                                                        const val = parseInt(e.target.value) || 0;
+                                                        const monthlyVal = rentalForm.rateType === 'Monthly' ? val : val * 30;
+                                                        updateRentalItemRow(row.id, 'lockedRatePerMonth', monthlyVal);
+                                                    }}
+                                                />
+                                            ) : (
+                                                <div className="text-xs font-bold text-neutral-400 py-3 px-3 bg-neutral-950 rounded-xl border border-neutral-800 truncate">
+                                                    -
+                                                </div>
+                                            )}
                                         </div>
                                         <div className="col-span-3">
                                             <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1">Qty</label>
@@ -5086,7 +5135,9 @@ const App: React.FC = () => {
                                 item, 
                                 row.quantity, 
                                 rentalForm.rateType === 'Monthly' ? rentalForm.manualMonths : calculateDaysDiff(), 
-                                rentalForm.rateType === 'Monthly'
+                                rentalForm.rateType === 'Monthly',
+                                row.lockedRatePerMonth,
+                                row.lockedRatePerMonth !== undefined ? row.lockedRatePerMonth / 30 : undefined
                                 ) 
                             : 0;
                         
@@ -5126,9 +5177,24 @@ const App: React.FC = () => {
                                     <div className="grid grid-cols-12 gap-3">
                                         <div className="col-span-5">
                                             <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1">Rate</label>
-                                            <div className="text-xs font-bold text-neutral-400 py-3 px-3 bg-neutral-950 rounded-xl border border-neutral-800 truncate">
-                                                {item ? formatCurrency(rentalForm.rateType === 'Monthly' ? item.monthlyPrice : item.unitPrice) : '-'}
-                                            </div>
+                                            {item ? (
+                                                <input
+                                                    type="number"
+                                                    min="0"
+                                                    className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-2 py-2.5 text-sm focus:ring-1 focus:ring-gray-500 outline-none text-white font-bold"
+                                                    value={row.lockedRatePerMonth !== undefined ? (rentalForm.rateType === 'Monthly' ? row.lockedRatePerMonth : Math.round(row.lockedRatePerMonth / 30)) : (rentalForm.rateType === 'Monthly' ? item.monthlyPrice : item.unitPrice)}
+                                                    onChange={(e) => {
+                                                        const val = parseInt(e.target.value) || 0;
+                                                        const monthlyVal = rentalForm.rateType === 'Monthly' ? val : val * 30;
+                                                        updateRentalItemRow(row.id, 'lockedRatePerMonth', monthlyVal);
+                                                    }}
+                                                    disabled={rentalToEdit?.status === RentalStatus.RETURNED}
+                                                />
+                                            ) : (
+                                                <div className="text-xs font-bold text-neutral-400 py-3 px-3 bg-neutral-950 rounded-xl border border-neutral-800 truncate">
+                                                    -
+                                                </div>
+                                            )}
                                         </div>
                                         <div className="col-span-3">
                                             <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1">Qty</label>
@@ -5601,7 +5667,9 @@ const App: React.FC = () => {
                                 item, 
                                 row.quantity, 
                                 rentalForm.rateType === 'Monthly' ? rentalForm.manualMonths : calculateDaysDiff(), 
-                                rentalForm.rateType === 'Monthly'
+                                rentalForm.rateType === 'Monthly',
+                                row.lockedRatePerMonth,
+                                row.lockedRatePerMonth !== undefined ? row.lockedRatePerMonth / 30 : undefined
                                 ) 
                             : 0;
                         
@@ -5638,9 +5706,23 @@ const App: React.FC = () => {
                                     <div className="grid grid-cols-12 gap-3">
                                         <div className="col-span-5">
                                             <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1">Rate</label>
-                                            <div className="text-xs font-bold text-neutral-400 py-3 px-3 bg-neutral-950 rounded-xl border border-neutral-800 truncate">
-                                                {item ? formatCurrency(rentalForm.rateType === 'Monthly' ? item.monthlyPrice : item.unitPrice) : '-'}
-                                            </div>
+                                            {item ? (
+                                                <input
+                                                    type="number"
+                                                    min="0"
+                                                    className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-2 py-2.5 text-sm focus:ring-1 focus:ring-gray-500 outline-none text-white font-bold"
+                                                    value={row.lockedRatePerMonth !== undefined ? (rentalForm.rateType === 'Monthly' ? row.lockedRatePerMonth : Math.round(row.lockedRatePerMonth / 30)) : (rentalForm.rateType === 'Monthly' ? item.monthlyPrice : item.unitPrice)}
+                                                    onChange={(e) => {
+                                                        const val = parseInt(e.target.value) || 0;
+                                                        const monthlyVal = rentalForm.rateType === 'Monthly' ? val : val * 30;
+                                                        updateRentalItemRow(row.id, 'lockedRatePerMonth', monthlyVal);
+                                                    }}
+                                                />
+                                            ) : (
+                                                <div className="text-xs font-bold text-neutral-400 py-3 px-3 bg-neutral-950 rounded-xl border border-neutral-800 truncate">
+                                                    -
+                                                </div>
+                                            )}
                                         </div>
                                         <div className="col-span-3">
                                             <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1">Qty</label>
