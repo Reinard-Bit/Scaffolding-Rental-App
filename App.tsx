@@ -120,6 +120,8 @@ const App: React.FC = () => {
   const [isPurchaseModalOpen, setIsPurchaseModalOpen] = useState(false);
   const [isCustomerModalOpen, setIsCustomerModalOpen] = useState(false);
   const [isRentalModalOpen, setIsRentalModalOpen] = useState(false);
+  const [isEditRentalModalOpen, setIsEditRentalModalOpen] = useState(false);
+  const [rentalToEdit, setRentalToEdit] = useState<Rental | null>(null);
   const [isQuotationModalOpen, setIsQuotationModalOpen] = useState(false);
   const [rentalStep, setRentalStep] = useState(1);
   const [editingCustomerId, setEditingCustomerId] = useState<string | null>(null);
@@ -653,6 +655,130 @@ const App: React.FC = () => {
     setIsRentalModalOpen(true);
   };
 
+  const handleEditRentalClick = (rental: Rental) => {
+    setRentalToEdit(rental);
+    setRentalForm({
+      customerId: rental.customerId,
+      startDate: rental.startDate,
+      endDate: rental.endDate,
+      items: rental.items.map(item => ({
+        id: Math.random().toString(36).substr(2, 9),
+        itemId: item.itemId,
+        quantity: item.quantity
+      })),
+      rateType: rental.rateType || 'Daily',
+      manualMonths: rental.manualMonths || 1,
+      deliveryAddress: rental.deliveryAddress || '',
+      deposit: rental.deposit || 0,
+      deliveryFee: rental.deliveryFee || 0,
+      paymentStatus: rental.paymentStatus || 'Pending'
+    });
+    setRentalStep(1);
+    setSetCount(1);
+    setIsEditRentalModalOpen(true);
+  };
+
+  const submitEditRental = async (e: React.FormEvent) => {
+    e.preventDefault();
+    
+    // Prevent submission if not on the final step
+    if (rentalStep !== 4) return;
+    
+    // Prevent double submission
+    if (isSubmitting) return;
+
+    if (!rentalToEdit) return;
+
+    setIsSubmitting(true);
+
+    try {
+      // Inventory Math: Calculate delta for each item
+      const oldItems = rentalToEdit.items;
+      const newItems = rentalForm.items;
+
+      const oldQuantities: Record<string, number> = {};
+      oldItems.forEach(item => {
+        oldQuantities[item.itemId] = (oldQuantities[item.itemId] || 0) + item.quantity;
+      });
+
+      const newQuantities: Record<string, number> = {};
+      newItems.forEach(item => {
+        newQuantities[item.itemId] = (newQuantities[item.itemId] || 0) + item.quantity;
+      });
+
+      const allItemIds = new Set([...Object.keys(oldQuantities), ...Object.keys(newQuantities)]);
+
+      // First pass: validate all stock availability
+      const updates: { item: InventoryItem; newAvailable: number }[] = [];
+      for (const itemId of allItemIds) {
+        const oldQty = oldQuantities[itemId] || 0;
+        const newQty = newQuantities[itemId] || 0;
+        const delta = newQty - oldQty;
+
+        if (delta !== 0) {
+          const inventoryItem = inventory.find(i => i.id === itemId);
+          if (inventoryItem) {
+            const newAvailable = inventoryItem.availableQuantity - delta;
+            if (newAvailable < 0) {
+              alert(`Not enough stock for ${inventoryItem.name}. Available: ${inventoryItem.availableQuantity}, Requested additional: ${delta}`);
+              return;
+            }
+            updates.push({ item: inventoryItem, newAvailable });
+          }
+        }
+      }
+
+      // Second pass: apply all updates
+      for (const update of updates) {
+        const newItemState = { ...update.item, availableQuantity: update.newAvailable };
+        await updateInventoryItem(newItemState);
+        // Update local inventory state
+        setInventory(prev => prev.map(i => i.id === update.item.id ? newItemState : i));
+      }
+
+      // Aggregate duplicate items
+      const validItems = rentalForm.items.filter(i => i.itemId && i.quantity > 0);
+      const aggregatedItemsMap = new Map<string, number>();
+      for (const item of validItems) {
+          const current = aggregatedItemsMap.get(item.itemId) || 0;
+          aggregatedItemsMap.set(item.itemId, current + item.quantity);
+      }
+      const aggregatedItems = Array.from(aggregatedItemsMap.entries()).map(([itemId, quantity]) => ({
+          itemId,
+          quantity
+      }));
+
+      const totalCost = calculateRentalTotal();
+
+      const updatedRental: Rental = {
+        ...rentalToEdit,
+        customerId: rentalForm.customerId,
+        startDate: rentalForm.startDate,
+        endDate: rentalForm.endDate,
+        items: aggregatedItems,
+        paymentStatus: rentalForm.paymentStatus,
+        totalCost: totalCost,
+        deliveryAddress: rentalForm.deliveryAddress,
+        deposit: rentalForm.deposit,
+        deliveryFee: rentalForm.deliveryFee,
+        rateType: rentalForm.rateType,
+        manualMonths: rentalForm.manualMonths,
+      };
+
+      await updateRental(updatedRental);
+      
+      setRentals(prev => prev.map(r => r.id === rentalToEdit.id ? updatedRental : r));
+      
+      setIsEditRentalModalOpen(false);
+      setRentalToEdit(null);
+    } catch (error) {
+      console.error("Error updating rental:", error);
+      alert("Failed to update rental.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   const handleOpenQuotationModal = () => {
     setRentalForm({
       customerId: '',
@@ -1100,7 +1226,7 @@ const App: React.FC = () => {
     const updatedRental: Rental = { 
           ...rentalToReturn, 
           status: RentalStatus.RETURNED,
-          endDate: returnDate,
+          actualReturnDate: returnDate,
           ...(damageFee > 0 && { damageFee }),
           returnSnapshot: snapshot,
           ...(depositStatus && { depositStatus }),
@@ -2935,6 +3061,13 @@ const App: React.FC = () => {
                                     {(rental.status === RentalStatus.ACTIVE || rental.status === RentalStatus.OVERDUE) && (
                                        <>
                                           <button
+                                             onClick={(e) => { e.stopPropagation(); handleEditRentalClick(rental); }}
+                                             className="px-3 py-2 bg-transparent border border-gray-600 text-white hover:bg-gray-800 rounded-lg"
+                                             title="Edit Rental"
+                                          >
+                                             <Pencil size={16} />
+                                          </button>
+                                          <button
                                              onClick={(e) => { e.stopPropagation(); handleExtendClick(rental); }}
                                              className="px-3 py-2 bg-amber-500/10 hover:bg-amber-500/20 text-amber-500 border border-amber-500/20 rounded-lg"
                                           >
@@ -3102,6 +3235,14 @@ const App: React.FC = () => {
                                     <div className="flex items-center justify-center space-x-2">
                                         {(rental.status === RentalStatus.ACTIVE || rental.status === RentalStatus.OVERDUE) && (
                                             <>
+                                                <button
+                                                    onClick={(e) => { e.stopPropagation(); handleEditRentalClick(rental); }}
+                                                    className="inline-flex items-center space-x-1.5 text-xs font-bold text-white hover:text-gray-200 bg-transparent hover:bg-gray-800 px-3 py-2 rounded-xl transition-all border border-gray-600"
+                                                    title="Edit Rental"
+                                                >
+                                                    <Pencil size={14} />
+                                                    <span>Edit</span>
+                                                </button>
                                                 <button
                                                     onClick={(e) => { e.stopPropagation(); handleExtendClick(rental); }}
                                                     className="inline-flex items-center space-x-1.5 text-xs font-bold text-amber-500 hover:text-amber-400 bg-amber-500/10 hover:bg-amber-500/20 px-3 py-2 rounded-xl transition-all border border-amber-500/20"
@@ -4521,6 +4662,440 @@ const App: React.FC = () => {
         </div>
       )}
 
+      {/* Edit Rental Modal */}
+      {isEditRentalModalOpen && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-gray-900/60 backdrop-blur-sm" onClick={() => setIsEditRentalModalOpen(false)} />
+          <div className="relative w-full max-w-2xl bg-[#0a0a0a] border border-gray-700/50 rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between px-5 py-4 md:px-8 md:py-6 border-b border-neutral-800 shrink-0 bg-[#0a0a0a] z-10">
+                <div>
+                  <h2 className="text-lg md:text-xl font-bold flex items-center text-white">
+                      <FileText size={20} className="mr-2 text-white" /> Edit Rental Contract
+                  </h2>
+                  <div className="flex items-center mt-1.5 space-x-2">
+                    <span className="px-2 py-0.5 rounded bg-neutral-800 text-[10px] font-bold text-neutral-400 uppercase tracking-wider">
+                      Step {rentalStep}/4
+                    </span>
+                    <span className="text-xs text-neutral-500 font-medium">
+                      {rentalStep === 1 ? "Client & Type" :
+                       rentalStep === 2 ? "Rental Period" :
+                       rentalStep === 3 ? "Select Equipment" :
+                       "Final Details"}
+                    </span>
+                  </div>
+                </div>
+                <button onClick={() => setIsEditRentalModalOpen(false)} className="p-2 -mr-2 text-neutral-500 hover:text-white transition-colors rounded-full hover:bg-neutral-800">
+                    <X size={20} />
+                </button>
+            </div>
+
+            <form onSubmit={submitEditRental} className="flex-1 flex flex-col min-h-0 bg-[#0a0a0a]">
+              <div className="flex-1 overflow-y-auto p-5 md:p-8 space-y-6 touch-pan-y">
+                
+                {/* Step 1: Client & Type */}
+                {rentalStep === 1 && (
+                  <div className="space-y-6 animate-in fade-in slide-in-from-right-8 duration-300">
+                    <div>
+                        <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">Contract Type</label>
+                        <div className="flex bg-neutral-900 p-1.5 rounded-xl border border-neutral-800">
+                            <button
+                                type="button"
+                                onClick={() => setRentalForm({...rentalForm, rateType: 'Daily'})}
+                                className={`flex-1 py-3 text-xs md:text-sm font-bold rounded-lg transition-all ${rentalForm.rateType === 'Daily' ? 'bg-white text-black shadow-md' : 'text-neutral-500 hover:text-neutral-300'}`}
+                            >
+                                Daily / Custom
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                     const start = new Date(rentalForm.startDate);
+                                     start.setMonth(start.getMonth() + 1);
+                                     setRentalForm({
+                                        ...rentalForm, 
+                                        rateType: 'Monthly', 
+                                        manualMonths: 1,
+                                        endDate: start.toISOString().split('T')[0]
+                                     });
+                                }}
+                                className={`flex-1 py-3 text-xs md:text-sm font-bold rounded-lg transition-all ${rentalForm.rateType === 'Monthly' ? 'bg-white text-black shadow-md' : 'text-neutral-500 hover:text-neutral-300'}`}
+                            >
+                                Monthly Fixed
+                            </button>
+                        </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">Select Client</label>
+                      <select 
+                        required
+                        className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white appearance-none"
+                        value={rentalForm.customerId}
+                        onChange={(e) => {
+                          const selectedCId = e.target.value;
+                          const client = customers.find(c => c.id === selectedCId);
+                          setRentalForm({ 
+                            ...rentalForm, 
+                            customerId: selectedCId,
+                            deliveryAddress: client ? client.address : '' 
+                          });
+                        }}
+                      >
+                        <option value="">Select a Client...</option>
+                        {customers.map(c => (
+                          <option key={c.id} value={c.id}>{c.name} - {c.company}</option>
+                        ))}
+                      </select>
+                      <div className="mt-2 text-[10px] text-neutral-500 px-1">
+                        * Selecting a client will auto-fill the delivery address in the final step.
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Step 2: Dates */}
+                {rentalStep === 2 && (
+                  <div className="space-y-6 animate-in fade-in slide-in-from-right-8 duration-300">
+                    <div>
+                      <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">Start Date</label>
+                      <div className="relative">
+                        <Calendar className="absolute left-4 top-1/2 -translate-y-1/2 text-neutral-500 pointer-events-none" size={18} />
+                        <input 
+                          required
+                          type="date"
+                          className="w-full h-12 bg-neutral-900 border border-neutral-800 rounded-xl pl-12 pr-4 py-3 text-base md:text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white appearance-none [color-scheme:dark] text-left"
+                          value={rentalForm.startDate}
+                          onChange={(e) => {
+                               const newStart = e.target.value;
+                               if (rentalForm.rateType === 'Monthly') {
+                                   const start = new Date(newStart);
+                                   start.setMonth(start.getMonth() + rentalForm.manualMonths);
+                                   setRentalForm({ 
+                                      ...rentalForm, 
+                                      startDate: newStart,
+                                      endDate: start.toISOString().split('T')[0]
+                                   });
+                               } else {
+                                   setRentalForm({ ...rentalForm, startDate: newStart });
+                               }
+                          }}
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      {rentalForm.rateType === 'Daily' ? (
+                          <>
+                              <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">End Date</label>
+                              <div className="relative">
+                              <Calendar className="absolute left-4 top-1/2 -translate-y-1/2 text-neutral-500 pointer-events-none" size={18} />
+                              <input 
+                                  required
+                                  type="date"
+                                  className="w-full h-12 bg-neutral-900 border border-neutral-800 rounded-xl pl-12 pr-4 py-3 text-base md:text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white appearance-none [color-scheme:dark] text-left"
+                                  value={rentalForm.endDate}
+                                  min={rentalForm.startDate}
+                                  onChange={(e) => setRentalForm({ ...rentalForm, endDate: e.target.value })}
+                              />
+                              </div>
+                          </>
+                      ) : (
+                          <>
+                              <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">Duration (Months)</label>
+                              <div className="relative">
+                              <Clock className="absolute left-4 top-1/2 -translate-y-1/2 text-neutral-500" size={18} />
+                              <input 
+                                  required
+                                  type="number"
+                                  min="1"
+                                  step="0.5"
+                                  className="w-full bg-neutral-900 border border-neutral-800 rounded-xl pl-12 pr-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white"
+                                  value={rentalForm.manualMonths}
+                                  onChange={(e) => {
+                                      const months = parseFloat(e.target.value) || 0;
+                                      const start = new Date(rentalForm.startDate);
+                                      start.setMonth(start.getMonth() + months);
+                                      setRentalForm({ 
+                                          ...rentalForm, 
+                                          manualMonths: months,
+                                          endDate: start.toISOString().split('T')[0]
+                                      });
+                                  }}
+                              />
+                              </div>
+                          </>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Step 3: Equipment */}
+                {rentalStep === 3 && (
+                  <div className="space-y-6 animate-in fade-in slide-in-from-right-8 duration-300">
+                    {/* Quick Add Set UI */}
+                    <div className="bg-gradient-to-br from-blue-900/20 to-blue-900/5 border border-white/20 rounded-2xl p-4 md:p-5">
+                        <div className="flex flex-col gap-4">
+                            <div className="flex items-start space-x-4">
+                                <div className="p-3 bg-white rounded-xl text-black shrink-0 shadow-lg shadow-white/10">
+                                    <Layers size={24} />
+                                </div>
+                                <div>
+                                    <h4 className="text-base font-bold text-white">Quick Add Set</h4>
+                                    <p className="text-[11px] text-neutral-400 mt-1 leading-relaxed">
+                                      Includes: 2x Main Frame, 2x Cross Brace, 4x Join Pin
+                                    </p>
+                                </div>
+                            </div>
+                            
+                            <div className="flex items-center gap-3 bg-black/20 p-2 rounded-xl border border-white/5">
+                                <div className="flex-1 flex flex-col px-2">
+                                    <label className="text-[9px] font-black uppercase tracking-widest text-neutral-500 mb-0.5">Quantity</label>
+                                    <input 
+                                        type="number" 
+                                        min="1"
+                                        value={setCount}
+                                        onChange={(e) => setSetCount(Math.max(1, parseInt(e.target.value) || 0))}
+                                        className="w-full bg-transparent font-bold text-white focus:outline-none text-lg"
+                                    />
+                                </div>
+                                <button 
+                                    type="button"
+                                    onClick={handleAddSet}
+                                    className="h-10 px-4 bg-white hover:bg-gray-200 text-black font-bold rounded-lg transition-all active:scale-95 flex items-center justify-center shadow-lg text-sm"
+                                >
+                                    <Plus size={16} className="mr-2" /> Add
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="flex items-center justify-between mb-2 border-b border-neutral-800 pb-3">
+                        <h3 className="text-sm font-bold text-white">Equipment List</h3>
+                        <span className="text-[10px] font-bold text-neutral-400 bg-neutral-900 border border-neutral-800 px-2 py-1 rounded-lg">
+                        {rentalForm.rateType === 'Daily' 
+                            ? `${calculateDaysDiff()} Days` 
+                            : `${rentalForm.manualMonths} Months`}
+                        </span>
+                    </div>
+
+                    <div className="space-y-3">
+                        {rentalForm.items.map((row, index) => {
+                        const item = inventory.find(i => i.id === row.itemId);
+                        const subtotal = item 
+                            ? getItemRentalCost(
+                                item, 
+                                row.quantity, 
+                                rentalForm.rateType === 'Monthly' ? rentalForm.manualMonths : calculateDaysDiff(), 
+                                rentalForm.rateType === 'Monthly'
+                                ) 
+                            : 0;
+                        
+                        return (
+                            <div key={row.id} className="relative bg-neutral-900/60 p-4 rounded-2xl border border-neutral-800 hover:border-white/30 transition-all group">
+                                <button 
+                                    type="button"
+                                    onClick={() => removeRentalItemRow(row.id)}
+                                    className="absolute -top-2 -right-2 bg-neutral-800 text-neutral-400 hover:text-rose-500 hover:bg-neutral-700 p-1.5 rounded-full border border-neutral-700 shadow-sm transition-all z-10"
+                                >
+                                    <X size={14} />
+                                </button>
+
+                                <div className="grid grid-cols-1 gap-4">
+                                    {/* Item Select */}
+                                    <div>
+                                        <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1.5">Item Name</label>
+                                        <div className="relative">
+                                            <select 
+                                                required
+                                                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl pl-3 pr-8 py-3 text-sm focus:ring-1 focus:ring-gray-500 outline-none text-white appearance-none"
+                                                value={row.itemId}
+                                                onChange={(e) => updateRentalItemRow(row.id, 'itemId', e.target.value)}
+                                            >
+                                                <option value="">Choose item...</option>
+                                                {inventory.map(item => (
+                                                    <option key={item.id} value={item.id}>{item.name}</option>
+                                                ))}
+                                            </select>
+                                            <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-500 pointer-events-none" size={14} />
+                                        </div>
+                                    </div>
+
+                                    <div className="grid grid-cols-12 gap-3">
+                                        <div className="col-span-5">
+                                            <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1">Rate</label>
+                                            <div className="text-xs font-bold text-neutral-400 py-3 px-3 bg-neutral-950 rounded-xl border border-neutral-800 truncate">
+                                                {item ? formatCurrency(rentalForm.rateType === 'Monthly' ? item.monthlyPrice : item.unitPrice) : '-'}
+                                            </div>
+                                        </div>
+                                        <div className="col-span-3">
+                                            <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1">Qty</label>
+                                            <input 
+                                                required
+                                                type="number"
+                                                min="1"
+                                                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-2 py-2.5 text-sm focus:ring-1 focus:ring-gray-500 outline-none text-white font-bold text-center"
+                                                value={row.quantity}
+                                                onChange={(e) => updateRentalItemRow(row.id, 'quantity', parseInt(e.target.value) || 0)}
+                                            />
+                                        </div>
+                                        <div className="col-span-4">
+                                            <label className="block text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-1 text-right">Subtotal</label>
+                                            <div className="text-xs font-bold text-white py-3 px-3 bg-neutral-950 rounded-xl border border-neutral-800 text-right truncate">
+                                                {formatCurrency(subtotal)}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        );
+                        })}
+                    </div>
+                   
+                    <button 
+                      type="button"
+                      onClick={addRentalItemRow}
+                      className="w-full py-3.5 border border-dashed border-neutral-800 rounded-xl flex items-center justify-center text-neutral-500 hover:text-white hover:border-white/30 hover:bg-white/5 transition-all text-xs font-bold uppercase tracking-widest mt-4 group"
+                    >
+                      <Plus size={16} className="mr-2 group-hover:scale-110 transition-transform" /> Add Item
+                    </button>
+                  </div>
+                )}
+
+                {/* Step 4: Details */}
+                {rentalStep === 4 && (
+                  <div className="space-y-6 animate-in fade-in slide-in-from-right-8 duration-300">
+                    <div>
+                       <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">Delivery Location <span className="text-rose-500">*</span></label>
+                       <textarea
+                          required
+                          rows={3}
+                          className="w-full bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white placeholder-neutral-600"
+                          value={rentalForm.deliveryAddress}
+                          onChange={(e) => setRentalForm({ ...rentalForm, deliveryAddress: e.target.value })}
+                          placeholder="Enter the specific project site address..."
+                       />
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-5 bg-neutral-900/50 p-5 rounded-2xl border border-neutral-800/50">
+                       <div>
+                           <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">Security Deposit (IDR)</label>
+                           <div className="relative">
+                               <Wallet className="absolute left-4 top-1/2 -translate-y-1/2 text-neutral-500" size={18} />
+                               <input 
+                                    type="number"
+                                    min="0"
+                                    className="w-full bg-neutral-900 border border-neutral-700 rounded-xl pl-12 pr-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-emerald-500 outline-none transition-all text-white placeholder-neutral-600"
+                                    value={rentalForm.deposit}
+                                    onChange={(e) => setRentalForm({ ...rentalForm, deposit: parseInt(e.target.value) || 0 })}
+                                    placeholder="0"
+                               />
+                           </div>
+                       </div>
+                       <div>
+                           <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">Delivery & Setup Fee (IDR)</label>
+                           <div className="relative">
+                               <Truck className="absolute left-4 top-1/2 -translate-y-1/2 text-neutral-500" size={18} />
+                               <input 
+                                    type="number"
+                                    min="0"
+                                    className="w-full bg-neutral-900 border border-neutral-700 rounded-xl pl-12 pr-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white placeholder-neutral-600"
+                                    value={rentalForm.deliveryFee}
+                                    onChange={(e) => setRentalForm({ ...rentalForm, deliveryFee: parseInt(e.target.value) || 0 })}
+                                    placeholder="0"
+                               />
+                           </div>
+                       </div>
+                       <div>
+                           <label className="block text-[11px] font-bold text-neutral-500 uppercase tracking-widest mb-2.5">Payment Status</label>
+                            <div className="relative">
+                               <select
+                                    className="w-full bg-neutral-900 border border-neutral-700 rounded-xl px-4 py-3.5 text-base md:text-sm focus:ring-2 focus:ring-gray-500 outline-none transition-all text-white appearance-none"
+                                    value={rentalForm.paymentStatus}
+                                    onChange={(e) => setRentalForm({ ...rentalForm, paymentStatus: e.target.value as any })}
+                               >
+                                    <option value="Pending">Pending</option>
+                                    <option value="Paid">Paid</option>
+                                    <option value="Overdue">Overdue</option>
+                               </select>
+                               <ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 text-neutral-500 pointer-events-none" size={16} />
+                            </div>
+                       </div>
+                    </div>
+
+                    <div className="bg-neutral-900 p-5 rounded-2xl border border-neutral-800">
+                        <div className="flex justify-between items-center mb-3">
+                            <span className="text-xs text-neutral-400">Rental Subtotal</span>
+                            <span className="text-sm font-bold text-white">{formatCurrency(calculateRentalTotal())}</span>
+                        </div>
+                        <div className="flex justify-between items-center mb-3">
+                            <span className="text-xs text-neutral-400">Delivery Fee</span>
+                            <span className="text-sm font-bold text-white">{formatCurrency(rentalForm.deliveryFee)}</span>
+                        </div>
+                        <div className="flex justify-between items-center pt-4 border-t border-neutral-800 mt-2">
+                            <span className="text-sm font-bold text-white">Total Estimated</span>
+                            <span className="text-2xl font-black text-white">{formatCurrency(calculateRentalTotal() + rentalForm.deliveryFee)}</span>
+                        </div>
+                    </div>
+                  </div>
+                )}
+
+              </div>
+
+              {/* Footer Actions */}
+              <div className="p-5 md:p-8 border-t border-neutral-800 bg-[#0a0a0a] flex items-center justify-between shrink-0 z-10">
+                  {rentalStep > 1 ? (
+                    <button 
+                      type="button" 
+                      onClick={(e) => {
+                        e.preventDefault();
+                        setRentalStep(s => s - 1);
+                      }}
+                      className="px-6 py-3.5 rounded-xl font-bold text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors text-sm"
+                    >
+                      Back
+                    </button>
+                  ) : (
+                    <div></div> 
+                  )}
+
+                  {rentalStep < 4 ? (
+                    <button 
+                      type="button"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        if (rentalStep === 1 && !rentalForm.customerId) {
+                          alert("Please select a client.");
+                          return;
+                        }
+                        if (rentalStep === 2 && (!rentalForm.startDate || (!rentalForm.endDate && rentalForm.rateType === 'Daily'))) {
+                          alert("Please select valid dates.");
+                          return;
+                        }
+                        if (rentalStep === 3 && rentalForm.items.filter(i => i.itemId && i.quantity > 0).length === 0) {
+                          alert("Please add at least one item.");
+                          return;
+                        }
+                        setRentalStep(s => s + 1);
+                      }}
+                      className="bg-white hover:bg-gray-200 text-black px-8 py-3.5 rounded-xl font-bold text-sm shadow-lg shadow-white/10 transition-all active:scale-95 flex items-center"
+                    >
+                      Next Step <ChevronRight size={18} className="ml-2" />
+                    </button>
+                  ) : (
+                    <button 
+                      type="submit"
+                      disabled={!isStep4Ready || isSubmitting}
+                      className={`bg-emerald-600 hover:bg-emerald-500 text-white px-8 py-3.5 rounded-xl font-bold text-sm shadow-lg shadow-emerald-600/20 transition-all active:scale-95 flex items-center ${(!isStep4Ready || isSubmitting) ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    >
+                      {isSubmitting ? <Loader2 className="animate-spin mr-2" size={18} /> : <CheckCircle2 size={18} className="mr-2" />} 
+                      Save Changes
+                    </button>
+                  )}
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Quotation Modal */}
       {isQuotationModalOpen && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
@@ -4958,6 +5533,22 @@ const App: React.FC = () => {
             </div>
 
             <div className="flex flex-col flex-1 overflow-y-auto custom-scrollbar pr-2 space-y-6 pb-4">
+                {/* ACTUAL RETURN DATE */}
+                <div className="h-auto flex-shrink-0 space-y-4">
+                    <h3 className="text-sm font-bold text-white flex items-center uppercase tracking-widest">
+                        <CalendarClock size={16} className="mr-2 text-white" /> Actual Return Date
+                    </h3>
+                    <div className="px-2">
+                        <input
+                            type="date"
+                            value={returnDate}
+                            onChange={(e) => setReturnDate(e.target.value)}
+                            className="w-full bg-[#141414] border border-gray-800 text-white rounded-xl px-4 py-3 focus:outline-none focus:border-white focus:ring-1 focus:ring-white transition-colors"
+                            required
+                        />
+                    </div>
+                </div>
+
                 {/* SECTION 1: INVENTORY TRACKING */}
                 <div className="h-auto flex-shrink-0 space-y-4">
                     <h3 className="text-sm font-bold text-white flex items-center uppercase tracking-widest">

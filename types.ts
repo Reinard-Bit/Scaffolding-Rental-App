@@ -71,6 +71,7 @@ export interface Rental {
   rateType?: 'Daily' | 'Monthly';
   manualMonths?: number;
   createdAt?: string;
+  actualReturnDate?: string;
 }
 
 export interface PurchaseItem {
