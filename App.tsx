@@ -264,6 +264,21 @@ const App: React.FC = () => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isStep4Ready, setIsStep4Ready] = useState(false);
 
+  // --- Derived State for Totals ---
+  const derivedMissingQuantities = useMemo(() => {
+    const missingMap: Record<string, number> = {};
+    rentals.forEach(rental => {
+      if (rental.status === RentalStatus.RETURNED && rental.returnSnapshot) {
+        rental.returnSnapshot.forEach(snapshot => {
+          if (snapshot.missing > 0) {
+            missingMap[snapshot.itemId] = (missingMap[snapshot.itemId] || 0) + snapshot.missing;
+          }
+        });
+      }
+    });
+    return missingMap;
+  }, [rentals]);
+
   useEffect(() => {
     if (rentalToPrint) {
       const handleAfterPrint = () => setRentalToPrint(null);
@@ -299,7 +314,42 @@ const App: React.FC = () => {
           getOperationalExpenses()
         ]);
         
-        setInventory(invData);
+        // --- State Cleanup (Self-Correction) ---
+        // Calculate true missing quantities from all valid return snapshots
+        const trueMissingQuantities: Record<string, number> = {};
+        rentData.forEach(rental => {
+            if (rental.status === RentalStatus.RETURNED && rental.returnSnapshot) {
+                rental.returnSnapshot.forEach(snapshot => {
+                    if (snapshot.missing > 0) {
+                        trueMissingQuantities[snapshot.itemId] = (trueMissingQuantities[snapshot.itemId] || 0) + snapshot.missing;
+                    }
+                });
+            }
+        });
+
+        const updatedInventoryData = [...invData];
+        let needsUpdate = false;
+        for (let i = 0; i < updatedInventoryData.length; i++) {
+            const item = updatedInventoryData[i];
+            const trueMissing = trueMissingQuantities[item.id] || 0;
+            const currentMissing = item.missingQuantity || 0;
+            
+            if (currentMissing !== trueMissing) {
+                const diff = currentMissing - trueMissing; // e.g. 9 - 5 = 4
+                // We need to restore 'diff' items
+                const newItemState = {
+                    ...item,
+                    missingQuantity: trueMissing,
+                    totalQuantity: item.totalQuantity + diff,
+                    availableQuantity: item.availableQuantity + diff
+                };
+                await updateInventoryItem(newItemState);
+                updatedInventoryData[i] = newItemState;
+                needsUpdate = true;
+            }
+        }
+        
+        setInventory(needsUpdate ? updatedInventoryData : invData);
         setCustomers(custData);
         setRentals(rentData);
         setPurchases(purchData);
@@ -413,7 +463,7 @@ const App: React.FC = () => {
   };
 
   const totalDamagedItems = inventory.reduce((acc, i) => acc + (i.damagedQuantity || 0), 0);
-  const totalMissingItems = inventory.reduce((acc, i) => acc + (i.missingQuantity || 0), 0);
+  const totalMissingItems = inventory.reduce((acc, i) => acc + (derivedMissingQuantities[i.id] || 0), 0);
 
   const stats = {
     totalRevenue: rentals.reduce((acc, r) => {
@@ -1214,6 +1264,32 @@ const App: React.FC = () => {
 
   const confirmDeleteRental = async () => {
     if (rentalToDelete) {
+        const rental = rentals.find(r => r.id === rentalToDelete);
+        if (rental) {
+            const updatedInventory = [...inventory];
+            for (let idx = 0; idx < updatedInventory.length; idx++) {
+                const invItem = updatedInventory[idx];
+                const item = rental.items.find(i => i.itemId === invItem.id);
+                if (item) {
+                    const newItemState = { ...invItem };
+                    if (rental.status === RentalStatus.ACTIVE || rental.status === RentalStatus.OVERDUE) {
+                        newItemState.availableQuantity += item.quantity;
+                    } else if (rental.status === RentalStatus.RETURNED && rental.returnSnapshot) {
+                        const snapshot = rental.returnSnapshot.find(s => s.itemId === item.itemId);
+                        if (snapshot) {
+                            newItemState.damagedQuantity = Math.max(0, (newItemState.damagedQuantity || 0) - snapshot.damaged);
+                            newItemState.missingQuantity = Math.max(0, (newItemState.missingQuantity || 0) - snapshot.missing);
+                            newItemState.totalQuantity += snapshot.missing;
+                            newItemState.availableQuantity += (snapshot.damaged + snapshot.missing);
+                        }
+                    }
+                    await updateInventoryItem(newItemState);
+                    updatedInventory[idx] = newItemState;
+                }
+            }
+            setInventory(updatedInventory);
+        }
+
         await deleteRental(rentalToDelete);
         setRentals(prev => prev.filter(r => r.id !== rentalToDelete));
         setIsDeleteRentalModalOpen(false);
@@ -1340,6 +1416,83 @@ const App: React.FC = () => {
 
     setIsReturnModalOpen(false);
     setRentalToReturn(null);
+  };
+
+  // Missing Items Log State
+  const [expandedLossItemId, setExpandedLossItemId] = useState<string | null>(null);
+  const toggleLossExpand = (itemId: string) => setExpandedLossItemId(prev => prev === itemId ? null : itemId);
+  const [editingLossRecord, setEditingLossRecord] = useState<{ rentalId: string, itemId: string, missing: number } | null>(null);
+
+  const handleSaveLossRecord = async () => {
+    if (!editingLossRecord) return;
+    const { rentalId, itemId, missing } = editingLossRecord;
+    
+    const rental = rentals.find(r => r.id === rentalId);
+    if (!rental || !rental.returnSnapshot) return;
+
+    const snapshotItem = rental.returnSnapshot.find(s => s.itemId === itemId);
+    if (!snapshotItem) return;
+
+    const oldMissing = snapshotItem.missing;
+    const diff = missing - oldMissing;
+    if (diff === 0) {
+      setEditingLossRecord(null);
+      return;
+    }
+
+    const updatedSnapshot = rental.returnSnapshot.map(s => 
+      s.itemId === itemId ? { ...s, missing: missing, good: Math.max(0, s.good - diff) } : s
+    );
+    const updatedRental = { ...rental, returnSnapshot: updatedSnapshot };
+
+    const invItem = inventory.find(i => i.id === itemId);
+    if (invItem) {
+      const updatedInvItem = {
+        ...invItem,
+        missingQuantity: Math.max(0, (invItem.missingQuantity || 0) + diff),
+        totalQuantity: Math.max(0, invItem.totalQuantity - diff),
+        availableQuantity: Math.max(0, invItem.availableQuantity - diff)
+      };
+      
+      await updateInventoryItem(updatedInvItem);
+      setInventory(prev => prev.map(i => i.id === itemId ? updatedInvItem : i));
+    }
+
+    await updateRental(updatedRental);
+    setRentals(prev => prev.map(r => r.id === rentalId ? updatedRental : r));
+    
+    setEditingLossRecord(null);
+  };
+
+  const handleDeleteLossRecord = async (rentalId: string, itemId: string) => {
+    const rental = rentals.find(r => r.id === rentalId);
+    if (!rental || !rental.returnSnapshot) return;
+
+    const snapshotItem = rental.returnSnapshot.find(s => s.itemId === itemId);
+    if (!snapshotItem) return;
+
+    const missingAmount = snapshotItem.missing;
+
+    const updatedSnapshot = rental.returnSnapshot.map(s => 
+      s.itemId === itemId ? { ...s, missing: 0, good: s.good + missingAmount } : s
+    );
+    const updatedRental = { ...rental, returnSnapshot: updatedSnapshot };
+
+    const invItem = inventory.find(i => i.id === itemId);
+    if (invItem) {
+      const updatedInvItem = {
+        ...invItem,
+        missingQuantity: Math.max(0, (invItem.missingQuantity || 0) - missingAmount),
+        totalQuantity: invItem.totalQuantity + missingAmount,
+        availableQuantity: invItem.availableQuantity + missingAmount
+      };
+      
+      await updateInventoryItem(updatedInvItem);
+      setInventory(prev => prev.map(i => i.id === itemId ? updatedInvItem : i));
+    }
+
+    await updateRental(updatedRental);
+    setRentals(prev => prev.map(r => r.id === rentalId ? updatedRental : r));
   };
 
   // --- Customer Logic ---
@@ -1939,7 +2092,7 @@ const App: React.FC = () => {
                                {item.availableQuantity > 0 && <span className="text-emerald-500/80">{item.availableQuantity} Available</span>}
                                {rented > 0 && <span className="text-white/80">{rented} Rented</span>}
                                {item.damagedQuantity > 0 && <span className="text-rose-500/80">{item.damagedQuantity} Damaged</span>}
-                               {item.missingQuantity > 0 && <span className="text-orange-500/80 ml-auto">{item.missingQuantity} Lost (Lifetime)</span>}
+                              {derivedMissingQuantities[item.id] > 0 && <span className="text-orange-500/80 ml-auto">{derivedMissingQuantities[item.id]} Lost (Lifetime)</span>}
                             </div>
                          </div>
                        )
@@ -2361,37 +2514,111 @@ const App: React.FC = () => {
                   </div>
 
                   {inventory.filter(item => 
-                      (item.missingQuantity && item.missingQuantity > 0) &&
+                      (derivedMissingQuantities[item.id] > 0) &&
                       (item.name.toLowerCase().includes(searchTerm.toLowerCase()))
-                    ).map((item) => (
-                      <div key={item.id} className="bg-[#0a0a0a] rounded-2xl border border-neutral-800 p-5 shadow-sm relative overflow-hidden group">
-                           <div className="absolute left-0 top-0 bottom-0 w-1 bg-neutral-700" />
-                           <div className="pl-3">
-                              <div className="flex justify-between items-start mb-2">
-                                  <div className="flex items-center space-x-3">
-                                      <div className="p-2 bg-neutral-800 rounded-lg text-neutral-400">
-                                          <Ban size={18} />
-                                      </div>
-                                      <div>
-                                          <h3 className="font-bold text-white">{item.name}</h3>
-                                          <p className="text-[10px] text-neutral-500 uppercase tracking-wider">{item.category}</p>
-                                      </div>
+                    ).map((item) => {
+                      const itemLossRecords = rentals.filter(r => 
+                        r.status === RentalStatus.RETURNED && 
+                        r.returnSnapshot && 
+                        r.returnSnapshot.some(s => s.itemId === item.id && s.missing > 0)
+                      );
+                      const isExpanded = expandedLossItemId === item.id;
+
+                      return (
+                        <div key={item.id} className="bg-[#0a0a0a] rounded-2xl border border-neutral-800 p-5 shadow-sm relative overflow-hidden group cursor-pointer" onClick={() => toggleLossExpand(item.id)}>
+                             <div className="absolute left-0 top-0 bottom-0 w-1 bg-neutral-700" />
+                             <div className="pl-3">
+                                <div className="flex justify-between items-start mb-2">
+                                    <div className="flex items-center space-x-3">
+                                        <div className="p-2 bg-neutral-800 rounded-lg text-neutral-400">
+                                            <Ban size={18} />
+                                        </div>
+                                        <div>
+                                            <h3 className="font-bold text-white">{item.name}</h3>
+                                            <p className="text-[10px] text-neutral-500 uppercase tracking-wider">{item.category}</p>
+                                        </div>
+                                    </div>
+                                    <ChevronDown size={16} className={`text-neutral-500 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
+                                </div>
+                                <div className="mt-4 flex justify-between items-end">
+                                    <div>
+                                        <p className="text-[10px] text-neutral-500 uppercase font-bold tracking-wider mb-1">Lost Quantity</p>
+                                        <p className="text-xl font-black text-white">{derivedMissingQuantities[item.id]} <span className="text-xs font-normal text-neutral-500">Units</span></p>
+                                    </div>
+                                    <div className="text-right">
+                                        <p className="text-[10px] text-neutral-500 uppercase font-bold tracking-wider mb-1">Value Lost</p>
+                                        <p className="text-base font-bold text-neutral-400">~ {formatCurrency((item.unitPrice * 30) * derivedMissingQuantities[item.id])}</p>
+                                    </div>
+                                </div>
+                                {isExpanded && (
+                                  <div className="mt-4 pt-4 border-t border-neutral-800/50 space-y-3" onClick={e => e.stopPropagation()}>
+                                    <h4 className="text-[10px] font-bold text-neutral-500 uppercase tracking-wider mb-2">Detailed Loss History</h4>
+                                    {itemLossRecords.length > 0 ? itemLossRecords.map(record => {
+                                      const snapshot = record.returnSnapshot!.find(s => s.itemId === item.id)!;
+                                      const customer = customers.find(c => c.id === record.customerId);
+                                      const isEditing = editingLossRecord?.rentalId === record.id && editingLossRecord?.itemId === item.id;
+                                      
+                                      return (
+                                        <div key={record.id} className="bg-neutral-900/50 rounded-xl p-3 border border-neutral-800/50">
+                                          <div className="flex justify-between items-start mb-2">
+                                            <div>
+                                              <p className="text-xs font-bold text-white">{customer?.name || 'Unknown Partner'}</p>
+                                              <p className="text-[9px] text-neutral-500">{record.actualReturnDate || record.endDate}</p>
+                                            </div>
+                                            {!isEditing && (
+                                              <div className="flex space-x-1">
+                                                <button 
+                                                  onClick={(e) => { e.stopPropagation(); setEditingLossRecord({ rentalId: record.id, itemId: item.id, missing: snapshot.missing }); }}
+                                                  className="p-1.5 text-neutral-500 hover:text-white rounded"
+                                                >
+                                                  <Pencil size={12} />
+                                                </button>
+                                                <button 
+                                                  onClick={(e) => { e.stopPropagation(); handleDeleteLossRecord(record.id, item.id); }}
+                                                  className="p-1.5 text-neutral-500 hover:text-rose-500 rounded"
+                                                >
+                                                  <Trash2 size={12} />
+                                                </button>
+                                              </div>
+                                            )}
+                                          </div>
+                                          {isEditing ? (
+                                            <div className="flex items-center justify-between mt-2">
+                                              <input 
+                                                type="number" 
+                                                min="0"
+                                                className="w-20 bg-neutral-800 border border-neutral-700 text-white rounded px-2 py-1 text-xs"
+                                                value={editingLossRecord.missing}
+                                                onChange={(e) => setEditingLossRecord({ ...editingLossRecord, missing: parseInt(e.target.value) || 0 })}
+                                                onClick={(e) => e.stopPropagation()}
+                                              />
+                                              <div className="flex space-x-2">
+                                                <button onClick={(e) => { e.stopPropagation(); handleSaveLossRecord(); }} className="text-emerald-400 p-1">
+                                                  <CheckCircle2 size={14} />
+                                                </button>
+                                                <button onClick={(e) => { e.stopPropagation(); setEditingLossRecord(null); }} className="text-neutral-500 p-1">
+                                                  <X size={14} />
+                                                </button>
+                                              </div>
+                                            </div>
+                                          ) : (
+                                            <div className="flex justify-between items-center mt-1">
+                                              <span className="text-[10px] text-neutral-500">Qty Lost:</span>
+                                              <span className="text-xs font-bold text-rose-500">{snapshot.missing} units</span>
+                                            </div>
+                                          )}
+                                        </div>
+                                      );
+                                    }) : (
+                                      <p className="text-xs text-neutral-500">No detailed records found.</p>
+                                    )}
                                   </div>
-                              </div>
-                              <div className="mt-4 flex justify-between items-end">
-                                  <div>
-                                      <p className="text-[10px] text-neutral-500 uppercase font-bold tracking-wider mb-1">Lost Quantity</p>
-                                      <p className="text-xl font-black text-white">{item.missingQuantity} <span className="text-xs font-normal text-neutral-500">Units</span></p>
-                                  </div>
-                                  <div className="text-right">
-                                      <p className="text-[10px] text-neutral-500 uppercase font-bold tracking-wider mb-1">Value Lost</p>
-                                      <p className="text-base font-bold text-neutral-400">~ {formatCurrency((item.unitPrice * 30) * item.missingQuantity)}</p>
-                                  </div>
-                              </div>
-                           </div>
-                      </div>
-                    ))}
-                    {inventory.filter(i => i.missingQuantity && i.missingQuantity > 0).length === 0 && (
+                                )}
+                             </div>
+                        </div>
+                      );
+                    })}
+                    {inventory.filter(i => derivedMissingQuantities[i.id] > 0).length === 0 && (
                         <div className="text-center py-12 text-neutral-500 bg-[#0a0a0a] rounded-2xl border border-neutral-800 border-dashed">
                              <p className="text-sm">No missing items recorded.</p>
                         </div>
@@ -2416,37 +2643,119 @@ const App: React.FC = () => {
                   </thead>
                   <tbody className="divide-y divide-neutral-800/50">
                     {inventory.filter(item => 
-                      (item.missingQuantity && item.missingQuantity > 0) &&
+                      (derivedMissingQuantities[item.id] > 0) &&
                       (item.name.toLowerCase().includes(searchTerm.toLowerCase()))
                     ).map((item) => {
+                      const itemLossRecords = rentals.filter(r => 
+                        r.status === RentalStatus.RETURNED && 
+                        r.returnSnapshot && 
+                        r.returnSnapshot.some(s => s.itemId === item.id && s.missing > 0)
+                      );
+                      const isExpanded = expandedLossItemId === item.id;
+
                       return (
-                        <tr key={item.id} className="hover:bg-gray-800/50 transition-all group">
-                          <td className="px-8 py-6">
-                             <div className="flex items-center space-x-3">
-                                <div className="p-2 bg-neutral-700/30 rounded-lg text-neutral-400">
-                                   <Ban size={20} />
+                        <React.Fragment key={item.id}>
+                          <tr className="hover:bg-gray-800/50 transition-all group cursor-pointer" onClick={() => toggleLossExpand(item.id)}>
+                            <td className="px-8 py-6">
+                               <div className="flex items-center space-x-3">
+                                  <div className="p-2 bg-neutral-700/30 rounded-lg text-neutral-400">
+                                     <Ban size={20} />
+                                  </div>
+                                  <p className="font-bold text-white mb-0.5">{item.name}</p>
+                               </div>
+                            </td>
+                            <td className="px-8 py-6">
+                              <span className="px-2.5 py-1 bg-neutral-800 text-neutral-300 rounded-md text-[10px] font-black uppercase tracking-tight">
+                                {item.category}
+                              </span>
+                            </td>
+                            <td className="px-8 py-6">
+                              <span className="text-lg font-black text-white">{derivedMissingQuantities[item.id]} <span className="text-xs font-normal text-neutral-500">units</span></span>
+                            </td>
+                            <td className="px-8 py-6 text-right">
+                               <div className="flex items-center justify-end space-x-4">
+                                 <div>
+                                   <span className="text-sm font-bold text-neutral-400">
+                                       ~ {formatCurrency((item.unitPrice * 30) * derivedMissingQuantities[item.id])} 
+                                   </span>
+                                   <p className="text-[9px] text-neutral-600 mt-0.5">Based on monthly rental value replacement calc</p>
+                                 </div>
+                                 <ChevronDown size={16} className={`text-neutral-500 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
+                               </div>
+                            </td>
+                          </tr>
+                          {isExpanded && (
+                            <tr>
+                              <td colSpan={4} className="p-0 border-b border-neutral-800/50 bg-neutral-900/30">
+                                <div className="p-6 px-12">
+                                  <h4 className="text-xs font-bold text-neutral-400 uppercase tracking-wider mb-4">Detailed Loss History</h4>
+                                  {itemLossRecords.length > 0 ? (
+                                    <div className="space-y-2">
+                                      {itemLossRecords.map(record => {
+                                        const snapshot = record.returnSnapshot!.find(s => s.itemId === item.id)!;
+                                        const customer = customers.find(c => c.id === record.customerId);
+                                        const isEditing = editingLossRecord?.rentalId === record.id && editingLossRecord?.itemId === item.id;
+                                        
+                                        return (
+                                          <div key={record.id} className="flex items-center justify-between bg-[#0a0a0a] border border-neutral-800 p-4 rounded-xl">
+                                            <div className="flex flex-col">
+                                              <span className="text-sm font-bold text-white">{customer?.name || 'Unknown Partner'}</span>
+                                              <span className="text-[10px] text-neutral-500">Transaction ID: {record.id.toUpperCase()} • Date: {record.actualReturnDate || record.endDate}</span>
+                                            </div>
+                                            <div className="flex items-center space-x-4">
+                                              {isEditing ? (
+                                                <div className="flex items-center space-x-2">
+                                                  <input 
+                                                    type="number" 
+                                                    min="0"
+                                                    className="w-20 bg-neutral-800 border border-neutral-700 text-white rounded px-2 py-1 text-sm"
+                                                    value={editingLossRecord.missing}
+                                                    onChange={(e) => setEditingLossRecord({ ...editingLossRecord, missing: parseInt(e.target.value) || 0 })}
+                                                  />
+                                                  <button onClick={handleSaveLossRecord} className="text-emerald-400 hover:text-emerald-300 p-1">
+                                                    <CheckCircle2 size={16} />
+                                                  </button>
+                                                  <button onClick={() => setEditingLossRecord(null)} className="text-neutral-500 hover:text-neutral-400 p-1">
+                                                    <X size={16} />
+                                                  </button>
+                                                </div>
+                                              ) : (
+                                                <>
+                                                  <div className="text-right mr-4">
+                                                    <span className="text-sm font-bold text-rose-500">{snapshot.missing} units lost</span>
+                                                  </div>
+                                                  <button 
+                                                    onClick={(e) => { e.stopPropagation(); setEditingLossRecord({ rentalId: record.id, itemId: item.id, missing: snapshot.missing }); }}
+                                                    className="text-neutral-500 hover:text-white p-2 transition-colors"
+                                                    title="Edit Record"
+                                                  >
+                                                    <Pencil size={14} />
+                                                  </button>
+                                                  <button 
+                                                    onClick={(e) => { e.stopPropagation(); handleDeleteLossRecord(record.id, item.id); }}
+                                                    className="text-neutral-500 hover:text-rose-500 p-2 transition-colors"
+                                                    title="Delete Record"
+                                                  >
+                                                    <Trash2 size={14} />
+                                                  </button>
+                                                </>
+                                              )}
+                                            </div>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  ) : (
+                                    <p className="text-sm text-neutral-500">No detailed records found for this item.</p>
+                                  )}
                                 </div>
-                                <p className="font-bold text-white mb-0.5">{item.name}</p>
-                             </div>
-                          </td>
-                          <td className="px-8 py-6">
-                            <span className="px-2.5 py-1 bg-neutral-800 text-neutral-300 rounded-md text-[10px] font-black uppercase tracking-tight">
-                              {item.category}
-                            </span>
-                          </td>
-                          <td className="px-8 py-6">
-                            <span className="text-lg font-black text-white">{item.missingQuantity} <span className="text-xs font-normal text-neutral-500">units</span></span>
-                          </td>
-                          <td className="px-8 py-6 text-right">
-                             <span className="text-sm font-bold text-neutral-400">
-                                 ~ {formatCurrency((item.unitPrice * 30) * item.missingQuantity)} 
-                             </span>
-                             <p className="text-[9px] text-neutral-600 mt-0.5">Based on monthly rental value replacement calc</p>
-                          </td>
-                        </tr>
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
                       );
                     })}
-                     {inventory.filter(i => i.missingQuantity && i.missingQuantity > 0).length === 0 && (
+                     {inventory.filter(i => derivedMissingQuantities[i.id] > 0).length === 0 && (
                         <tr>
                             <td colSpan={4} className="px-8 py-12 text-center text-neutral-500">
                                 <p>No missing items recorded.</p>
